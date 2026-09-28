@@ -1,0 +1,8 @@
+phy_management.sv
+phy_init.sv
+mdio_cmd.sv
+mdio_arb.sv
+../lib/taxi/src/lss/rtl/taxi_mdio_master.sv
+../lib/taxi/src/axis/rtl/taxi_axis_arb_mux.f
+../lib/taxi/src/axis/rtl/taxi_axis_demux.sv
+../lib/taxi/src/axis/rtl/taxi_axis_if.sv
