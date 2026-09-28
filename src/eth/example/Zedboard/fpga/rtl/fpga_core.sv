@@ -179,12 +179,13 @@ eth_mac_inst (
     /*
      * Configuration
      */
+    // maximum lengths include the FCS and allow one 802.1Q tag
     .cfg_tx_pad_en(1'b1),
     .cfg_tx_min_pkt_len(8'd60-1),
-    .cfg_tx_max_pkt_len(16'd1518-1),
+    .cfg_tx_max_pkt_len(16'd1522-1),
     .cfg_tx_ifg(8'd12),
     .cfg_tx_enable(1'b1),
-    .cfg_rx_max_pkt_len(16'd1518-1),
+    .cfg_rx_max_pkt_len(16'd1522-1),
     .cfg_rx_enable(1'b1)
 );
 

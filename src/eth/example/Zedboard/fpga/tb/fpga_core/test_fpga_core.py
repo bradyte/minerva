@@ -18,7 +18,7 @@ import cocotb_test.simulator
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import RisingEdge
+from cocotb.triggers import RisingEdge, with_timeout
 
 from cocotbext.eth import GmiiFrame, RgmiiPhy
 
@@ -99,6 +99,23 @@ async def mac_test(tb, source, sink):
     tb.log.info("MAC test done")
 
 
+async def vlan_test(tb, source, sink):
+    tb.log.info("Full-size 802.1Q tagged packet")
+
+    # 1518 bytes with the tag, 1522 on the wire with the FCS; an oversize drop
+    # must fail the test rather than hang it
+    hdr = bytes.fromhex('ffffffffffff' '5a5152535455' '8100' '0064' '22f0')
+    pkt = bytearray(hdr + bytes(k % 256 for k in range(1518 - len(hdr))))
+
+    await source.send(GmiiFrame.from_payload(pkt))
+
+    rx_frame = await with_timeout(sink.recv(), 100, 'us')
+
+    assert rx_frame.get_payload() == pkt
+    assert rx_frame.check_fcs()
+    assert rx_frame.error is None
+
+
 @cocotb.test()
 async def run_test(dut):
 
@@ -109,11 +126,12 @@ async def run_test(dut):
     tb.log.info("Start BASE-T MAC loopback test")
 
     await mac_test(tb, tb.baset_phy.rx, tb.baset_phy.tx)
+    await vlan_test(tb, tb.baset_phy.rx, tb.baset_phy.tx)
 
     # the counters read over the VIO on hardware must agree with the traffic
     status = dut.ctrl_status_inst
-    assert status.rx_good_cnt_reg.value.integer == 96
-    assert status.tx_good_cnt_reg.value.integer == 96
+    assert status.rx_good_cnt_reg.value.integer == 97
+    assert status.tx_good_cnt_reg.value.integer == 97
     assert status.rx_bad_fcs_cnt_reg.value.integer == 0
     assert status.rx_bad_frame_cnt_reg.value.integer == 0
 
