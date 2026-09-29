@@ -79,3 +79,11 @@ set_input_delay 0 [get_ports phy_mdio]
 # No IDELAY value and no TX phase shift: the PHY supplies both delays.
 # set_input_delay on phy_rxd is deliberately absent until the tap sweep
 # provides real numbers - see ../../docs/architecture.md.
+
+# Placement
+
+# taxi_rgmii_phy_if.tcl limits the TXC registers to TXC ODDR path to a quarter
+# period (2 ns), so the registers sit beside the ODDR (OLOGIC_X1Y124, pin B19)
+create_pblock pblock_rgmii_tx_clk
+add_cells_to_pblock [get_pblocks pblock_rgmii_tx_clk] [get_cells core_inst/eth_mac_inst/eth_mac_1g_rgmii_inst/rgmii_phy_if_inst/rgmii_tx_clk_*_reg_reg]
+resize_pblock [get_pblocks pblock_rgmii_tx_clk] -add {SLICE_X112Y123:SLICE_X113Y125}
