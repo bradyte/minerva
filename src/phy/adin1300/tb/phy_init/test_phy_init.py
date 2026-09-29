@@ -198,9 +198,11 @@ async def run_test(dut, phy_addr=7, present=True):
 
         # the RGMII receive delay must be turned off at the PHY, or the board
         # comes up unable to receive: GE_RGMII_CFG is 0xFF23 on device 0x1E
-        assert slave.writes == [], f"unexpected clause 22 writes: {slave.writes}"
         assert slave.c45_writes == [(phy_addr, 0x1E, 0xFF23, 0x0E03)], \
             f"PHY config write wrong or missing: {slave.c45_writes}"
+        # IRQ_MASK: INT_N enabled for a link status change only
+        assert slave.writes == [(phy_addr, 0x18, 0x0005)], \
+            f"IRQ_MASK write wrong or missing: {slave.writes}"
     else:
         assert int(dut.phy_present.value) == 0
         assert slave.writes == [] and slave.c45_writes == [], \

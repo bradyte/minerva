@@ -86,12 +86,13 @@ endfunction
 
 localparam logic [4:0] REG_PHY_ID_1 = 5'h02;
 localparam logic [4:0] REG_PHY_ID_2 = 5'h03;
+localparam logic [4:0] REG_IRQ_MASK = 5'h18;
 
 // the ADIN1300 subsystem and PHY core extended registers
 localparam logic [4:0] DEVAD_EMI = 5'h1E;
 
 // init_data ROM
-localparam INIT_DATA_LEN = 2;
+localparam INIT_DATA_LEN = 3;
 localparam PTR_W = INIT_DATA_LEN > 1 ? $clog2(INIT_DATA_LEN) : 1;
 
 logic [31:0] init_data [INIT_DATA_LEN-1:0];
@@ -101,6 +102,9 @@ initial begin
     // receive clock delay
     init_data[0] = c45_addr(DEVAD_EMI, 16'hFF23);
     init_data[1] = c45_wr(DEVAD_EMI, 16'h0E03);
+    // IRQ_MASK: HW_IRQ_EN and LNK_STAT_CHNG_IRQ_EN, so INT_N asserts on a link
+    // change and holds until IRQ_STATUS (0x19) is read
+    init_data[2] = c22_wr(REG_IRQ_MASK, 16'h0005);
 end
 
 typedef enum logic [2:0] {

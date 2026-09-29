@@ -15,9 +15,9 @@ Authors:
 /*
  * PHY management
  *
- * Owns the PHY reset and the MDIO master.  Initialization holds source 0 of
- * the arbiter; the request port is source 1, left free for whatever
- * drives it - a VIO today, the PS or a register block later.
+ * Owns the PHY reset, the MDIO master and the interrupt pin.  Initialization
+ * holds source 0 of the arbiter; the request port is source 1, left free for
+ * whatever drives it - a VIO today, the PS or a register block later.
  */
 module phy_management #
 (
@@ -37,6 +37,7 @@ module phy_management #
     output wire logic         phy_mdio_t,
     output wire logic         phy_mdc,
     output wire logic         phy_reset_n,
+    input  wire logic         phy_int_n,
 
     /*
      * Startup scan result
@@ -45,6 +46,11 @@ module phy_management #
     output wire logic         phy_present,
     output wire logic [31:0]  phy_id,
     output wire logic         phy_id_done,
+
+    /*
+     * PHY interrupt, active high, held until IRQ_STATUS is read
+     */
+    output wire logic         phy_irq,
 
     /*
      * Single-transaction request port
@@ -57,6 +63,21 @@ module phy_management #
     output wire logic [15:0]  req_rd_data,
     output wire logic         req_busy
 );
+
+// INT_N is asynchronous to clk
+wire phy_int_n_sync;
+
+taxi_sync_signal #(
+    .WIDTH(1),
+    .N(2)
+)
+phy_int_n_sync_inst (
+    .clk(clk),
+    .in(phy_int_n),
+    .out(phy_int_n_sync)
+);
+
+assign phy_irq = !phy_int_n_sync;
 
 taxi_axis_if #(.DATA_W(32), .KEEP_W(1), .KEEP_EN(0)) axis_cmd[2]();
 taxi_axis_if #(.DATA_W(16), .KEEP_W(1), .KEEP_EN(0)) axis_rd[2]();

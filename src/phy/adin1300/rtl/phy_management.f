@@ -6,3 +6,4 @@ mdio_arb.sv
 ../lib/taxi/src/axis/rtl/taxi_axis_arb_mux.f
 ../lib/taxi/src/axis/rtl/taxi_axis_demux.sv
 ../lib/taxi/src/axis/rtl/taxi_axis_if.sv
+../lib/taxi/src/sync/rtl/taxi_sync_signal.sv
