@@ -14,6 +14,7 @@ Authors:
 import logging
 import os
 import struct
+import sys
 
 import cocotb_test.simulator
 
@@ -23,6 +24,16 @@ from cocotb.triggers import RisingEdge, with_timeout
 
 from cocotbext.eth import GmiiFrame, RgmiiPhy
 from cocotbext.uart import UartSource, UartSink
+
+try:
+    from xfcp import XfcpFrame
+except ImportError:
+    # attempt import from current directory
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+    try:
+        from xfcp import XfcpFrame
+    finally:
+        del sys.path[0]
 
 
 class TB:
@@ -61,6 +72,30 @@ class TB:
         for k in range(10):
             await RisingEdge(self.dut.clk)
 
+    async def xfcp_request(self, pkt):
+        await self.uart_source.write(pkt.build_cobs())
+
+        rx_data = bytearray()
+        while True:
+            b = await self.uart_sink.read(1)
+            if b[0] == 0:
+                break
+            rx_data.extend(b)
+
+        return XfcpFrame.parse_cobs(rx_data)
+
+    async def xfcp_read(self, path, addr, length):
+        pkt = XfcpFrame(path=path, ptype=0x10, payload=struct.pack('<HH', addr, length))
+
+        rx_pkt = await with_timeout(self.xfcp_request(pkt), 10, 'ms')
+
+        # the reply carries the path back, and echoes the address and length
+        assert rx_pkt.path == path
+        assert rx_pkt.ptype == 0x11
+        assert rx_pkt.payload[:4] == pkt.payload
+
+        return rx_pkt.payload[4:]
+
 
 # host and board addresses; LOCAL_MAC matches fpga_core
 HOST_MAC = bytes.fromhex('5a5152535455')
@@ -68,6 +103,15 @@ LOCAL_MAC = bytes.fromhex('020000000001')
 BCAST = b'\xff' * 6
 
 ETHERTYPE_AVTP = 0x22F0
+
+# XFCP paths: switch port 0 is the statistics module, whose own port 0 holds
+# the 64-bit counters and port 1 their names
+XFCP_STAT_COUNT = [0, 0]
+XFCP_STAT_STR = [0, 1]
+
+# MAC counter IDs, STAT_ID_BASE 0 at level 1: TX 0-15, RX 16-31
+STAT_TX_PKTS = 1
+STAT_RX_PKTS = 16+1
 
 
 def l2_frame(dst, src, ethertype, payload, vlan=None):
@@ -148,13 +192,17 @@ async def run_test(dut):
     assert status.phy_irq.value.integer == 1
     dut.phy_int_n.value = 1
 
-    # UART loopback, until XFCP is added
-    data = b'taxi'
-    await tb.uart_source.write(data)
-    rx_data = bytearray()
-    while len(rx_data) < len(data):
-        rx_data.extend(await with_timeout(tb.uart_sink.read(), 100, 'us'))
-    assert rx_data == data
+    # the same traffic counted by the MAC statistics, read over XFCP
+    for stat_id, name, count in [(STAT_TX_PKTS, 'TX_PKTS', tx_count), (STAT_RX_PKTS, 'RX_PKTS', rx_count)]:
+        val = int.from_bytes(await tb.xfcp_read(XFCP_STAT_COUNT, stat_id*8, 8), 'little')
+
+        s = await tb.xfcp_read(XFCP_STAT_STR, stat_id*16, 16)
+        s = (s[0:8].strip() + b"." + s[8:].strip()).decode('ascii')
+
+        tb.log.info("%s = %d", s, val)
+
+        assert s == f'BASET.{name}'
+        assert val == count
 
     await RisingEdge(dut.clk)
     await RisingEdge(dut.clk)
@@ -193,6 +241,9 @@ def test_fpga_core(request):
         os.path.join(taxi_src_dir, "minerva", "rtl", "minerva_rx_parse.sv"),
         os.path.join(taxi_src_dir, "minerva", "rtl", "minerva_tx_deparse.sv"),
         os.path.join(taxi_src_dir, "eth", "rtl", "taxi_eth_mac_1g_rgmii_fifo.f"),
+        os.path.join(taxi_src_dir, "xfcp", "rtl", "taxi_xfcp_if_uart.f"),
+        os.path.join(taxi_src_dir, "xfcp", "rtl", "taxi_xfcp_switch.sv"),
+        os.path.join(taxi_src_dir, "xfcp", "rtl", "taxi_xfcp_mod_stats.f"),
         os.path.join(taxi_src_dir, "phy", "adin1300", "rtl", "phy_management.f"),
         os.path.join(taxi_src_dir, "axis", "rtl", "taxi_axis_null_snk.sv"),
         os.path.join(taxi_src_dir, "sync", "rtl", "taxi_sync_signal.sv"),

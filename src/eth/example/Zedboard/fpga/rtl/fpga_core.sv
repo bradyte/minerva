@@ -67,8 +67,84 @@ module fpga_core #
     output wire logic        phy_rx_idelay_load
 );
 
-// UART loopback, a test fixture until XFCP is added
-assign uart_txd = uart_rxd;
+// XFCP
+taxi_axis_if #(.DATA_W(8), .USER_EN(1), .USER_W(1)) xfcp_ds(), xfcp_us();
+
+taxi_xfcp_if_uart #(
+    .TX_FIFO_DEPTH(512),
+    .RX_FIFO_DEPTH(512)
+)
+xfcp_if_uart_inst (
+    .clk(clk),
+    .rst(rst),
+
+    /*
+     * UART interface
+     */
+    .uart_rxd(uart_rxd),
+    .uart_txd(uart_txd),
+
+    /*
+     * XFCP downstream interface
+     */
+    .xfcp_dsp_ds(xfcp_ds),
+    .xfcp_dsp_us(xfcp_us),
+
+    /*
+     * Configuration
+     */
+    .prescale(16'(125000000/921600))
+);
+
+taxi_axis_if #(.DATA_W(8), .USER_EN(1), .USER_W(1)) xfcp_sw_ds[1](), xfcp_sw_us[1]();
+
+taxi_xfcp_switch #(
+    .XFCP_ID_STR("Zedboard"),
+    .XFCP_EXT_ID(0),
+    .XFCP_EXT_ID_STR("Taxi example"),
+    .PORTS($size(xfcp_sw_us))
+)
+xfcp_sw_inst (
+    .clk(clk),
+    .rst(rst),
+
+    /*
+     * XFCP upstream port
+     */
+    .xfcp_usp_ds(xfcp_ds),
+    .xfcp_usp_us(xfcp_us),
+
+    /*
+     * XFCP downstream ports
+     */
+    .xfcp_dsp_ds(xfcp_sw_ds),
+    .xfcp_dsp_us(xfcp_sw_us)
+);
+
+taxi_axis_if #(.DATA_W(16), .KEEP_W(1), .KEEP_EN(0), .LAST_EN(0), .USER_EN(1), .USER_W(1), .ID_EN(1), .ID_W(10)) axis_mac_stat();
+
+taxi_xfcp_mod_stats #(
+    .XFCP_ID_STR("Statistics"),
+    .XFCP_EXT_ID(0),
+    .XFCP_EXT_ID_STR(""),
+    .STAT_COUNT_W(64),
+    .STAT_PIPELINE(2)
+)
+xfcp_stats_inst (
+    .clk(clk),
+    .rst(rst),
+
+    /*
+     * XFCP upstream port
+     */
+    .xfcp_usp_ds(xfcp_sw_ds[0]),
+    .xfcp_usp_us(xfcp_sw_us[0]),
+
+    /*
+     * Statistics increment input
+     */
+    .s_axis_stat(axis_mac_stat)
+);
 
 // PHY management
 wire [4:0]  phy_addr;
@@ -118,7 +194,6 @@ phy_management_inst (
 taxi_axis_if #(.DATA_W(32), .USER_EN(1), .USER_W(1)) axis_mac_rx();
 taxi_axis_if #(.DATA_W(32), .USER_EN(1), .USER_W(1)) axis_mac_tx();
 taxi_axis_if #(.DATA_W(96), .KEEP_W(1), .ID_W(8)) axis_tx_cpl();
-taxi_axis_if #(.DATA_W(16), .KEEP_W(1), .KEEP_EN(0), .LAST_EN(0), .USER_EN(1), .USER_W(1), .ID_EN(1), .ID_W(8)) axis_stat();
 
 wire [1:0] link_speed;
 wire       tx_fifo_good_frame;
@@ -132,7 +207,13 @@ taxi_eth_mac_1g_rgmii_fifo #(
     .FAMILY(FAMILY),
     // the PHY delays the transmit clock, so the fabric adds none
     .USE_CLK90(1'b0),
-    .STAT_EN(1'b0),
+    .STAT_EN(1),
+    .STAT_TX_LEVEL(1),
+    .STAT_RX_LEVEL(1),
+    .STAT_ID_BASE(0),
+    .STAT_UPDATE_PERIOD(1024),
+    .STAT_STR_EN(1),
+    .STAT_PREFIX_STR("BASET"),
     .TX_FIFO_DEPTH(4096),
     .TX_FRAME_FIFO(1),
     .RX_FIFO_DEPTH(4096),
@@ -171,7 +252,7 @@ eth_mac_inst (
      */
     .stat_clk(clk),
     .stat_rst(rst),
-    .m_axis_stat(axis_stat),
+    .m_axis_stat(axis_mac_stat),
 
     /*
      * Status
@@ -200,15 +281,10 @@ eth_mac_inst (
     .cfg_rx_enable(1'b1)
 );
 
-// Completions and statistics have no consumer yet
+// Completions have no consumer yet
 taxi_axis_null_snk
 tx_cpl_null_inst (
     .s_axis(axis_tx_cpl)
-);
-
-taxi_axis_null_snk
-stat_null_inst (
-    .s_axis(axis_stat)
 );
 
 // Minerva L2 stack, with the AVTP echo standing in for the consumer
