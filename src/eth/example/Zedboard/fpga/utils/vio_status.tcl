@@ -31,7 +31,7 @@ proc vio_connect {ltx} {
 set vio [vio_connect $LTX]
 refresh_hw_vio $vio
 
-foreach name {phy_present phy_id_done phy_addr phy_id link_speed
+foreach name {phy_present phy_id_done phy_addr phy_id phy_irq link_speed
               rx_good_cnt_reg tx_good_cnt_reg rx_bad_fcs_cnt_reg rx_bad_frame_cnt_reg} {
     set p [get_hw_probes -of_objects $vio *ctrl_status_inst/$name]
     if {[string match *_cnt_reg $name]} { set_property INPUT_VALUE_RADIX UNSIGNED $p }

@@ -66,6 +66,7 @@ wire [4:0]  phy_addr;
 wire        phy_present;
 wire [31:0] phy_id;
 wire        phy_id_done;
+wire        phy_irq;
 
 wire [4:0]  vio_phy_addr;
 wire [4:0]  vio_reg_addr;
@@ -85,11 +86,13 @@ phy_management_inst (
     .phy_mdio_t(phy_mdio_t),
     .phy_mdc(phy_mdc),
     .phy_reset_n(phy_reset_n),
+    .phy_int_n(phy_int_n),
 
     .phy_addr(phy_addr),
     .phy_present(phy_present),
     .phy_id(phy_id),
     .phy_id_done(phy_id_done),
+    .phy_irq(phy_irq),
 
     .req_phy_addr(vio_phy_addr),
     .req_reg_addr(vio_reg_addr),
@@ -248,6 +251,7 @@ ctrl_status_inst (
     .phy_id_done(phy_id_done),
     .phy_addr(phy_addr),
     .phy_id(phy_id),
+    .phy_irq(phy_irq),
     .link_speed(link_speed),
 
     .rx_good(rx_fifo_good_frame),

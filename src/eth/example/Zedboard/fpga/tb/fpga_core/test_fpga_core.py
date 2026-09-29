@@ -136,6 +136,14 @@ async def run_test(dut):
     assert status.rx_bad_fcs_cnt_reg.value.integer == 0
     assert status.rx_bad_frame_cnt_reg.value.integer == 0
 
+    # INT_N reaches the VIO through phy_management, active high
+    assert status.phy_irq.value.integer == 0
+    dut.phy_int_n.value = 0
+    for k in range(4):
+        await RisingEdge(dut.clk)
+    assert status.phy_irq.value.integer == 1
+    dut.phy_int_n.value = 1
+
     await RisingEdge(dut.clk)
     await RisingEdge(dut.clk)
 

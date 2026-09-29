@@ -38,6 +38,7 @@ module ctrl_status #
     input  wire logic         phy_id_done,
     input  wire logic [4:0]   phy_addr,
     input  wire logic [31:0]  phy_id,
+    input  wire logic         phy_irq,
     input  wire logic [1:0]   link_speed,
 
     /*
@@ -99,6 +100,7 @@ end else begin : vio
         .probe_in8(rx_bad_fcs_cnt_reg),
         .probe_in9(rx_bad_frame_cnt_reg),
         .probe_in10(tx_good_cnt_reg),
+        .probe_in11(phy_irq),
         .probe_out0(req_phy_addr),
         .probe_out1(req_reg_addr),
         .probe_out2(req_wr_data),
