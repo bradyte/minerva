@@ -36,6 +36,11 @@ module fpga_core #
     input  wire logic        rst,
 
     /*
+     * Build timestamp, from USR_ACCESSE2
+     */
+    input  wire logic [31:0] build_id,
+
+    /*
      * GPIO
      */
     output wire logic [7:0]  led,
@@ -96,7 +101,7 @@ xfcp_if_uart_inst (
     .prescale(16'(125000000/921600))
 );
 
-taxi_axis_if #(.DATA_W(8), .USER_EN(1), .USER_W(1)) xfcp_sw_ds[1](), xfcp_sw_us[1]();
+taxi_axis_if #(.DATA_W(8), .USER_EN(1), .USER_W(1)) xfcp_sw_ds[2](), xfcp_sw_us[2]();
 
 taxi_xfcp_switch #(
     .XFCP_ID_STR("Zedboard"),
@@ -146,6 +151,57 @@ xfcp_stats_inst (
     .s_axis_stat(axis_mac_stat)
 );
 
+// Registers, generated from ../rdl/zedboard_regs.rdl
+taxi_apb_if #(
+    .DATA_W(zedboard_regs_pkg::ZEDBOARD_REGS_DATA_WIDTH),
+    .ADDR_W(zedboard_regs_pkg::ZEDBOARD_REGS_MIN_ADDR_WIDTH)
+) apb_regs();
+
+taxi_xfcp_mod_apb #(
+    .XFCP_EXT_ID_STR("Registers")
+)
+xfcp_mod_apb_inst (
+    .clk(clk),
+    .rst(rst),
+
+    /*
+     * XFCP upstream port
+     */
+    .xfcp_usp_ds(xfcp_sw_ds[1]),
+    .xfcp_usp_us(xfcp_sw_us[1]),
+
+    /*
+     * APB master interface
+     */
+    .m_apb(apb_regs)
+);
+
+assign apb_regs.pruser = '0;
+assign apb_regs.pbuser = '0;
+
+zedboard_regs_pkg::zedboard_regs__in_t regs_hwif_in;
+zedboard_regs_pkg::zedboard_regs__out_t regs_hwif_out;
+
+zedboard_regs
+regs_inst (
+    .clk(clk),
+    .rst(rst),
+
+    .s_apb_psel(apb_regs.psel),
+    .s_apb_penable(apb_regs.penable),
+    .s_apb_pwrite(apb_regs.pwrite),
+    .s_apb_pprot(apb_regs.pprot),
+    .s_apb_paddr(apb_regs.paddr),
+    .s_apb_pwdata(apb_regs.pwdata),
+    .s_apb_pstrb(apb_regs.pstrb),
+    .s_apb_pready(apb_regs.pready),
+    .s_apb_prdata(apb_regs.prdata),
+    .s_apb_pslverr(apb_regs.pslverr),
+
+    .hwif_in(regs_hwif_in),
+    .hwif_out(regs_hwif_out)
+);
+
 // PHY management
 wire [4:0]  phy_addr;
 wire        phy_present;
@@ -153,13 +209,8 @@ wire [31:0] phy_id;
 wire        phy_id_done;
 wire        phy_irq;
 
-wire [4:0]  vio_phy_addr;
-wire [4:0]  vio_reg_addr;
-wire [15:0] vio_wr_data;
-wire        vio_wr;
-wire        vio_go;
-wire [15:0] vio_rd_data;
-wire        vio_busy;
+wire [15:0] mdio_rd_data;
+wire        mdio_busy;
 
 phy_management
 phy_management_inst (
@@ -179,14 +230,46 @@ phy_management_inst (
     .phy_id_done(phy_id_done),
     .phy_irq(phy_irq),
 
-    .req_phy_addr(vio_phy_addr),
-    .req_reg_addr(vio_reg_addr),
-    .req_wr_data(vio_wr_data),
-    .req_wr(vio_wr),
-    .req_go(vio_go),
-    .req_rd_data(vio_rd_data),
-    .req_busy(vio_busy)
+    // the MDIO window in the registers, at the address the scan found
+    .req_phy_addr(phy_addr),
+    .req_reg_addr(regs_hwif_out.diag.MDIO_REG.reg_addr.value),
+    .req_wr_data({regs_hwif_out.diag.MDIO_WDATA_1.data.value, regs_hwif_out.diag.MDIO_WDATA_0.data.value}),
+    .req_wr(regs_hwif_out.diag.MDIO_CTRL.write.value),
+    .req_go(regs_hwif_out.diag.MDIO_CTRL.go.value),
+    .req_rd_data(mdio_rd_data),
+    .req_busy(mdio_busy)
 );
+
+always_comb begin
+    regs_hwif_in.diag.BUILD_ID_0.data.next = build_id[7:0];
+    regs_hwif_in.diag.BUILD_ID_1.data.next = build_id[15:8];
+    regs_hwif_in.diag.BUILD_ID_2.data.next = build_id[23:16];
+    regs_hwif_in.diag.BUILD_ID_3.data.next = build_id[31:24];
+
+    regs_hwif_in.diag.PHY_STATUS.present.next = phy_present;
+    regs_hwif_in.diag.PHY_STATUS.init_done.next = phy_id_done;
+    regs_hwif_in.diag.PHY_STATUS.irq.next = phy_irq;
+    regs_hwif_in.diag.PHY_ADDR.addr.next = phy_addr;
+
+    regs_hwif_in.diag.MDIO_CTRL.busy.next = mdio_busy;
+    regs_hwif_in.diag.MDIO_RDATA_0.data.next = mdio_rd_data[7:0];
+    regs_hwif_in.diag.MDIO_RDATA_1.data.next = mdio_rd_data[15:8];
+end
+
+// Receive IDELAY tap from the registers.  swmod pulses in the write cycle,
+// one clock before the tap value updates, so the load is registered once.
+logic idelay_load_reg = 1'b0;
+
+always_ff @(posedge clk) begin
+    idelay_load_reg <= regs_hwif_out.diag.IDELAY_TAP.tap.swmod;
+
+    if (rst) begin
+        idelay_load_reg <= 1'b0;
+    end
+end
+
+assign phy_rx_idelay_value = regs_hwif_out.diag.IDELAY_TAP.tap.value;
+assign phy_rx_idelay_load = idelay_load_reg;
 
 // Ethernet MAC
 //
@@ -344,16 +427,17 @@ ctrl_status_inst (
     .rx_bad_frame(rx_error_bad_frame),
     .tx_good(tx_fifo_good_frame),
 
-    .idelay_value(phy_rx_idelay_value),
-    .idelay_load(phy_rx_idelay_load),
+    // the registers own these controls now; the VIO only reads
+    .idelay_value(),
+    .idelay_load(),
 
-    .req_phy_addr(vio_phy_addr),
-    .req_reg_addr(vio_reg_addr),
-    .req_wr_data(vio_wr_data),
-    .req_wr(vio_wr),
-    .req_go(vio_go),
-    .req_rd_data(vio_rd_data),
-    .req_busy(vio_busy)
+    .req_phy_addr(),
+    .req_reg_addr(),
+    .req_wr_data(),
+    .req_wr(),
+    .req_go(),
+    .req_rd_data(mdio_rd_data),
+    .req_busy(mdio_busy)
 );
 
 endmodule

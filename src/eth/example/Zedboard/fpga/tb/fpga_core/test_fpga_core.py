@@ -20,7 +20,7 @@ import cocotb_test.simulator
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import RisingEdge, with_timeout
+from cocotb.triggers import RisingEdge, Timer, with_timeout
 
 from cocotbext.eth import GmiiFrame, RgmiiPhy
 from cocotbext.uart import UartSource, UartSink
@@ -32,6 +32,16 @@ except ImportError:
     sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
     try:
         from xfcp import XfcpFrame
+    finally:
+        del sys.path[0]
+
+try:
+    from mdio_slave import MdioSlave
+except ImportError:
+    # attempt import from current directory
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+    try:
+        from mdio_slave import MdioSlave
     finally:
         del sys.path[0]
 
@@ -51,9 +61,12 @@ class TB:
         self.uart_source = UartSource(dut.uart_rxd, baud=921600, bits=8, stop_bits=1)
         self.uart_sink = UartSink(dut.uart_txd, baud=921600, bits=8, stop_bits=1)
 
-        # no PHY management model: MDIO idles high, as the pull-up leaves it
+        # the ADIN1300's MDIO side, at a non-zero address so the scan is real
+        self.mdio_phy = MdioSlave(dut.phy_mdc, dut.phy_mdio_i, dut.phy_mdio_o, dut.phy_mdio_t,
+            PHY_ADDR, {0x02: PHY_ID_1, 0x03: PHY_ID_2})
+
         dut.phy_int_n.setimmediatevalue(1)
-        dut.phy_mdio_i.setimmediatevalue(1)
+        dut.build_id.setimmediatevalue(BUILD_ID)
 
     async def init(self):
 
@@ -96,6 +109,16 @@ class TB:
 
         return rx_pkt.payload[4:]
 
+    async def xfcp_write(self, path, addr, data):
+        pkt = XfcpFrame(path=path, ptype=0x12, payload=struct.pack('<HH', addr, len(data)) + bytes(data))
+
+        rx_pkt = await with_timeout(self.xfcp_request(pkt), 10, 'ms')
+
+        # the reply carries the path back, and echoes the address and length
+        assert rx_pkt.path == path
+        assert rx_pkt.ptype == 0x13
+        assert rx_pkt.payload[:4] == pkt.payload[:4]
+
 
 # host and board addresses; LOCAL_MAC matches fpga_core
 HOST_MAC = bytes.fromhex('5a5152535455')
@@ -112,6 +135,30 @@ XFCP_STAT_STR = [0, 1]
 # MAC counter IDs, STAT_ID_BASE 0 at level 1: TX 0-15, RX 16-31
 STAT_TX_PKTS = 1
 STAT_RX_PKTS = 16+1
+
+# switch port 1 is the register block, rdl/zedboard_regs.rdl
+XFCP_REGS = [1]
+
+REG_SCRATCH = 0x1000
+REG_BUILD_ID_0 = 0x1001
+REG_PHY_STATUS = 0x1005
+REG_PHY_ADDR = 0x1006
+REG_MDIO_REG = 0x1007
+REG_MDIO_CTRL = 0x100A
+REG_MDIO_RDATA_0 = 0x100B
+REG_IDELAY_TAP = 0x100D
+
+PHY_STATUS_PRESENT = 0x01
+PHY_STATUS_INIT_DONE = 0x02
+MDIO_CTRL_GO = 0x01
+MDIO_CTRL_WRITE = 0x02
+MDIO_CTRL_BUSY = 0x80
+
+# the model PHY, and what USR_ACCESSE2 would supply on hardware
+PHY_ADDR = 7
+PHY_ID_1 = 0x0283
+PHY_ID_2 = 0xBC30
+BUILD_ID = 0x1A2B3C4D
 
 
 def l2_frame(dst, src, ethertype, payload, vlan=None):
@@ -168,6 +215,73 @@ async def avtp_echo_test(tb, source, sink):
     return len(test_frames), sum(1 for _, echo in test_frames if echo is not None)
 
 
+async def mdio_request(tb, reg, data=None):
+    # MDIO_REG, WDATA_0, WDATA_1 and CTRL are consecutive, so one XFCP write
+    # sets up and starts a request; it writes upward, so go lands last
+    ctrl = MDIO_CTRL_GO | (MDIO_CTRL_WRITE if data is not None else 0)
+    await tb.xfcp_write(XFCP_REGS, REG_MDIO_REG, struct.pack('<BHB', reg, data or 0, ctrl))
+
+    while (await tb.xfcp_read(XFCP_REGS, REG_MDIO_CTRL, 1))[0] & MDIO_CTRL_BUSY:
+        pass
+
+    return int.from_bytes(await tb.xfcp_read(XFCP_REGS, REG_MDIO_RDATA_0, 2), 'little')
+
+
+async def registers_test(tb):
+    tb.log.info("Registers over XFCP")
+
+    dut = tb.dut
+
+    # scratch resets to 0 and reads back what was written
+    assert await tb.xfcp_read(XFCP_REGS, REG_SCRATCH, 1) == b'\x00'
+    await tb.xfcp_write(XFCP_REGS, REG_SCRATCH, b'\x5a')
+    assert await tb.xfcp_read(XFCP_REGS, REG_SCRATCH, 1) == b'\x5a'
+
+    # build ID, LSB first
+    build_id = int.from_bytes(await tb.xfcp_read(XFCP_REGS, REG_BUILD_ID_0, 4), 'little')
+    assert build_id == BUILD_ID
+
+    # the IDELAY tap resets to 12, and a write loads the new tap exactly once
+    assert await tb.xfcp_read(XFCP_REGS, REG_IDELAY_TAP, 1) == bytes([12])
+
+    loads = []
+
+    async def watch_idelay():
+        while True:
+            await RisingEdge(dut.clk)
+            if int(dut.phy_rx_idelay_load.value):
+                loads.append(int(dut.phy_rx_idelay_value.value))
+
+    watcher = cocotb.start_soon(watch_idelay())
+    await tb.xfcp_write(XFCP_REGS, REG_IDELAY_TAP, bytes([20]))
+    for k in range(10):
+        await RisingEdge(dut.clk)
+    watcher.kill()
+
+    assert loads == [20]
+    assert await tb.xfcp_read(XFCP_REGS, REG_IDELAY_TAP, 1) == bytes([20])
+
+    # the PHY: phy_init waits 5 ms after reset before it scans
+    for k in range(100):
+        status = (await tb.xfcp_read(XFCP_REGS, REG_PHY_STATUS, 1))[0]
+        if status & PHY_STATUS_INIT_DONE:
+            break
+        await Timer(200, 'us')
+
+    tb.log.info("PHY_STATUS = 0x%02x", status)
+
+    assert status == PHY_STATUS_PRESENT | PHY_STATUS_INIT_DONE
+    assert await tb.xfcp_read(XFCP_REGS, REG_PHY_ADDR, 1) == bytes([PHY_ADDR])
+
+    # the MDIO window reads the PHY ID and writes a register at the scanned address
+    assert await mdio_request(tb, 0x02) == PHY_ID_1
+    assert await mdio_request(tb, 0x03) == PHY_ID_2
+
+    await mdio_request(tb, 0x10, 0xFF23)
+    assert tb.mdio_phy.writes[-1] == (PHY_ADDR, 0x10, 0xFF23)
+    assert await mdio_request(tb, 0x10) == 0xFF23
+
+
 @cocotb.test()
 async def run_test(dut):
 
@@ -204,6 +318,8 @@ async def run_test(dut):
         assert s == f'BASET.{name}'
         assert val == count
 
+    await registers_test(tb)
+
     await RisingEdge(dut.clk)
     await RisingEdge(dut.clk)
 
@@ -235,7 +351,12 @@ def test_fpga_core(request):
     toplevel = dut
 
     verilog_sources = [
+        # lint waivers for the generated register block, then its package,
+        # which must be read before anything that uses it
+        os.path.join(rtl_dir, "zedboard_regs.vlt"),
+        os.path.join(rtl_dir, "zedboard_regs_pkg.sv"),
         os.path.join(rtl_dir, f"{dut}.sv"),
+        os.path.join(rtl_dir, "zedboard_regs.sv"),
         os.path.join(rtl_dir, "ctrl_status.sv"),
         os.path.join(rtl_dir, "avtp_echo.sv"),
         os.path.join(taxi_src_dir, "minerva", "rtl", "minerva_rx_parse.sv"),
@@ -244,6 +365,7 @@ def test_fpga_core(request):
         os.path.join(taxi_src_dir, "xfcp", "rtl", "taxi_xfcp_if_uart.f"),
         os.path.join(taxi_src_dir, "xfcp", "rtl", "taxi_xfcp_switch.sv"),
         os.path.join(taxi_src_dir, "xfcp", "rtl", "taxi_xfcp_mod_stats.f"),
+        os.path.join(taxi_src_dir, "xfcp", "rtl", "taxi_xfcp_mod_apb.f"),
         os.path.join(taxi_src_dir, "phy", "adin1300", "rtl", "phy_management.f"),
         os.path.join(taxi_src_dir, "axis", "rtl", "taxi_axis_null_snk.sv"),
         os.path.join(taxi_src_dir, "sync", "rtl", "taxi_sync_signal.sv"),

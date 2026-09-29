@@ -18,6 +18,8 @@ TAXI_SRC_DIR = $(LIB_DIR)/taxi/src
 # Files for synthesis
 SYN_FILES = $(RTL_DIR)/fpga.sv
 SYN_FILES += $(RTL_DIR)/fpga_core.sv
+SYN_FILES += $(RTL_DIR)/zedboard_regs_pkg.sv
+SYN_FILES += $(RTL_DIR)/zedboard_regs.sv
 SYN_FILES += $(RTL_DIR)/ctrl_status.sv
 SYN_FILES += $(RTL_DIR)/avtp_echo.sv
 SYN_FILES += $(TAXI_SRC_DIR)/minerva/rtl/minerva_rx_parse.sv
@@ -26,6 +28,7 @@ SYN_FILES += $(TAXI_SRC_DIR)/eth/rtl/taxi_eth_mac_1g_rgmii_fifo.f
 SYN_FILES += $(TAXI_SRC_DIR)/xfcp/rtl/taxi_xfcp_if_uart.f
 SYN_FILES += $(TAXI_SRC_DIR)/xfcp/rtl/taxi_xfcp_switch.sv
 SYN_FILES += $(TAXI_SRC_DIR)/xfcp/rtl/taxi_xfcp_mod_stats.f
+SYN_FILES += $(TAXI_SRC_DIR)/xfcp/rtl/taxi_xfcp_mod_apb.f
 SYN_FILES += $(TAXI_SRC_DIR)/phy/adin1300/rtl/phy_management.f
 SYN_FILES += $(TAXI_SRC_DIR)/axis/rtl/taxi_axis_null_snk.sv
 SYN_FILES += $(TAXI_SRC_DIR)/sync/rtl/taxi_sync_reset.sv

@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: MIT
+//
+// Copyright (c) 2026 Tom Brady
+//
+// Authors:
+// - Tom Brady
+//
+// Lint waivers for the generated register block, simulation only.
+// regblock writes separate members of its field_combo struct from separate
+// always_comb blocks; that is legal, but Verilator warns per variable.
+
+`verilator_config
+
+lint_off -rule MULTIDRIVEN -file "*/zedboard_regs.sv"

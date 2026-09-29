@@ -14,6 +14,9 @@
 set_property CFGBVS VCCO [current_design]
 set_property CONFIG_VOLTAGE 3.3 [current_design]
 
+# Build timestamp for USR_ACCESSE2, read back as BUILD_ID
+set_property BITSTREAM.CONFIG.USR_ACCESS TIMESTAMP [current_design]
+
 # Clock: 100 MHz oscillator, bank 13
 set_property -dict {PACKAGE_PIN Y9 IOSTANDARD LVCMOS33} [get_ports clk_100mhz]
 create_clock -period 10.000 -name clk_100mhz [get_ports clk_100mhz]

@@ -186,8 +186,18 @@ sync_signal_inst (
     .out(uart_rxd_int)
 );
 
+// Build timestamp, written into the bitstream by BITSTREAM.CONFIG.USR_ACCESS
+wire [31:0] build_id;
+
+USR_ACCESSE2
+usr_access_inst (
+    .CFGCLK(),
+    .DATA(build_id),
+    .DATAVALID()
+);
+
 // IODELAY elements for RGMII interface to PHY
-// VAR_LOAD so the tap can be re-swept over JTAG
+// VAR_LOAD so the tap can be re-swept from the IDELAY_TAP register
 wire [3:0] phy_rxd_int;
 wire       phy_rx_ctl_int;
 wire [4:0] phy_rx_idelay_value;
@@ -269,6 +279,8 @@ core_inst (
      */
     .clk(clk_int),
     .rst(rst_int),
+
+    .build_id(build_id),
 
     /*
      * GPIO

@@ -1,0 +1,94 @@
+// SPDX-License-Identifier: MIT
+//
+// Copyright (c) 2026 Tom Brady
+//
+// Authors:
+// - Tom Brady
+//
+// Zedboard register map, reached through XFCP switch port 1.
+// Registers are 8 bits; a wider value is split LSB first into NAME_0..NAME_n.
+// 0x0000-0x0FFF is reserved.
+
+addrmap zedboard_regs {
+    name = "Zedboard registers";
+
+    default regwidth = 8;
+    default accesswidth = 8;
+
+    reg build_id_byte {
+        name = "Build ID";
+        desc = "Bitstream build timestamp from USR_ACCESSE2, BUILD_ID_0 = bits 7:0.";
+        field { sw = r; hw = w; } data[7:0];
+    };
+
+    reg mdio_rdata_byte {
+        name = "MDIO read data";
+        desc = "Read data from the last MDIO request, valid once busy clears.";
+        field { sw = r; hw = w; } data[7:0];
+    };
+
+    regfile {
+        name = "Diagnostics";
+
+        reg {
+            name = "Scratch";
+            desc = "Read back what was written, to check the bus end to end.";
+            field { sw = rw; hw = na; } data[7:0] = 0;
+        } SCRATCH @ 0x0;
+
+        build_id_byte BUILD_ID_0 @ 0x1;
+        build_id_byte BUILD_ID_1 @ 0x2;
+        build_id_byte BUILD_ID_2 @ 0x3;
+        build_id_byte BUILD_ID_3 @ 0x4;
+
+        reg {
+            name = "PHY status";
+            field { sw = r; hw = w; desc = "The startup scan found the PHY."; } present[0:0];
+            field { sw = r; hw = w; desc = "The startup sequence has finished; with present = 0 the scan found no PHY."; } init_done[1:1];
+            field { sw = r; hw = w; desc = "INT_N, latched by the PHY until IRQ_STATUS (0x19) is read."; } irq[2:2];
+        } PHY_STATUS @ 0x5;
+
+        reg {
+            name = "PHY address";
+            desc = "MDIO address found by the startup scan; MDIO requests use it.";
+            field { sw = r; hw = w; } addr[4:0];
+        } PHY_ADDR @ 0x6;
+
+        reg {
+            name = "MDIO register";
+            desc = "Clause 22 register number for the next MDIO request.";
+            field { sw = rw; hw = r; } reg_addr[4:0] = 0;
+        } MDIO_REG @ 0x7;
+
+        reg {
+            name = "MDIO write data";
+            desc = "Taken only when MDIO_CTRL.go is written.";
+            field { sw = rw; hw = r; } data[7:0] = 0;
+        } MDIO_WDATA_0 @ 0x8;
+
+        reg {
+            name = "MDIO write data";
+            desc = "Taken only when MDIO_CTRL.go is written.";
+            field { sw = rw; hw = r; } data[7:0] = 0;
+        } MDIO_WDATA_1 @ 0x9;
+
+        reg {
+            name = "MDIO control";
+            field { sw = rw; hw = r; singlepulse; desc = "Write 1 to start the request."; } go[0:0] = 0;
+            field { sw = rw; hw = r; desc = "1 for a write, 0 for a read."; } write[1:1] = 0;
+            field { sw = r; hw = w; desc = "The request is in progress."; } busy[7:7];
+        } MDIO_CTRL @ 0xA;
+
+        mdio_rdata_byte MDIO_RDATA_0 @ 0xB;
+        mdio_rdata_byte MDIO_RDATA_1 @ 0xC;
+
+        reg {
+            name = "Receive IDELAY tap";
+            desc = "RGMII receive delay, 0-31 taps of about 78 ps; a write loads it.";
+            field { sw = rw; hw = r; swmod; } tap[4:0] = 12;
+        } IDELAY_TAP @ 0xD;
+
+        // 0x10-0x15 reserved for LOCAL_MAC_0..5
+
+    } diag @ 0x1000;
+};
