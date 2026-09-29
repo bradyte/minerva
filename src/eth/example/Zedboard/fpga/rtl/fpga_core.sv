@@ -15,8 +15,8 @@ Authors:
 /*
  * FPGA core logic
  *
- * Looped-back MAC on the ADIN1300: every received frame is sent straight back
- * out, unmodified.
+ * Minerva L2 stack on the ADIN1300 MAC.  Received AVTP payloads are echoed back
+ * to broadcast from LOCAL_MAC; every other frame is dropped in the parser.
  */
 module fpga_core #
 (
@@ -100,12 +100,11 @@ phy_management_inst (
     .req_busy(vio_busy)
 );
 
-// Ethernet MAC, looped back
+// Ethernet MAC
 //
-// One interface on both sides of the MAC: the RX FIFO drives it and the TX
-// FIFO consumes it.  The logic side runs 32 bits wide; the FIFOs convert from
-// the 8 bit GMII side.
-taxi_axis_if #(.DATA_W(32), .USER_EN(1), .USER_W(1)) axis_eth();
+// The logic side runs 32 bits wide; the FIFOs convert from the 8 bit GMII side.
+taxi_axis_if #(.DATA_W(32), .USER_EN(1), .USER_W(1)) axis_mac_rx();
+taxi_axis_if #(.DATA_W(32), .USER_EN(1), .USER_W(1)) axis_mac_tx();
 taxi_axis_if #(.DATA_W(96), .KEEP_W(1), .ID_W(8)) axis_tx_cpl();
 taxi_axis_if #(.DATA_W(16), .KEEP_W(1), .KEEP_EN(0), .LAST_EN(0), .USER_EN(1), .USER_W(1), .ID_EN(1), .ID_W(8)) axis_stat();
 
@@ -137,13 +136,13 @@ eth_mac_inst (
     /*
      * Transmit interface (AXI stream)
      */
-    .s_axis_tx(axis_eth),
+    .s_axis_tx(axis_mac_tx),
     .m_axis_tx_cpl(axis_tx_cpl),
 
     /*
      * Receive interface (AXI stream)
      */
-    .m_axis_rx(axis_eth),
+    .m_axis_rx(axis_mac_rx),
 
     /*
      * RGMII interface
@@ -198,6 +197,41 @@ tx_cpl_null_inst (
 taxi_axis_null_snk
 stat_null_inst (
     .s_axis(axis_stat)
+);
+
+// Minerva L2 stack, with the AVTP echo standing in for the consumer
+localparam logic [47:0] LOCAL_MAC = 48'h02_00_00_00_00_01;
+
+taxi_axis_if #(.DATA_W(32), .DEST_EN(1), .DEST_W(1)) axis_eth_rx();
+taxi_axis_if #(.DATA_W(32)) axis_eth_tx();
+
+minerva_rx_parse
+minerva_rx_parse_inst (
+    .clk(clk),
+    .rst(rst),
+
+    .s_axis_mac_rx(axis_mac_rx),
+    .m_axis_eth_rx(axis_eth_rx)
+);
+
+avtp_echo
+avtp_echo_inst (
+    .clk(clk),
+    .rst(rst),
+
+    .s_axis_eth_rx(axis_eth_rx),
+    .m_axis_eth_tx(axis_eth_tx)
+);
+
+minerva_tx_deparse #(
+    .LOCAL_MAC(LOCAL_MAC)
+)
+minerva_tx_deparse_inst (
+    .clk(clk),
+    .rst(rst),
+
+    .s_axis_eth_tx(axis_eth_tx),
+    .m_axis_mac_tx(axis_mac_tx)
 );
 
 // Control and status

@@ -13,6 +13,7 @@ Authors:
 
 import logging
 import os
+import struct
 
 import cocotb_test.simulator
 
@@ -57,63 +58,66 @@ class TB:
             await RisingEdge(self.dut.clk)
 
 
-async def mac_test(tb, source, sink):
-    tb.log.info("Test MAC")
+# host and board addresses; LOCAL_MAC matches fpga_core
+HOST_MAC = bytes.fromhex('5a5152535455')
+LOCAL_MAC = bytes.fromhex('020000000001')
+BCAST = b'\xff' * 6
 
-    tb.log.info("Multiple small packets")
+ETHERTYPE_AVTP = 0x22F0
 
-    count = 64
 
-    pkts = [bytearray([(x+k) % 256 for x in range(60)]) for k in range(count)]
+def l2_frame(dst, src, ethertype, payload, vlan=None):
+    tag = b'' if vlan is None else struct.pack('>HH', 0x8100, vlan)
+    return bytearray(dst + src + tag + struct.pack('>H', ethertype) + payload)
 
-    for p in pkts:
-        await source.send(GmiiFrame.from_payload(p))
 
-    for k in range(count):
-        rx_frame = await sink.recv()
+def payload_data(n, seed):
+    return bytes((seed + k) & 0xff for k in range(n))
+
+
+async def avtp_echo_test(tb, source, sink):
+    tb.log.info("AVTP echo through minerva")
+
+    # (frame sent, echo expected or None if it must be dropped)
+    test_frames = []
+
+    # every tail alignment, then full size
+    for n in (46, 47, 48, 49, 1500):
+        p = payload_data(n, n)
+        test_frames.append((l2_frame(BCAST, HOST_MAC, ETHERTYPE_AVTP, p),
+                            l2_frame(BCAST, LOCAL_MAC, ETHERTYPE_AVTP, p)))
+
+    # full-size tagged, 1522 bytes on the wire, comes back untagged
+    p = payload_data(1500, 7)
+    test_frames.append((l2_frame(BCAST, HOST_MAC, ETHERTYPE_AVTP, p, vlan=100),
+                        l2_frame(BCAST, LOCAL_MAC, ETHERTYPE_AVTP, p)))
+
+    # anything that is not AVTP is dropped
+    test_frames.insert(1, (l2_frame(BCAST, HOST_MAC, 0x88B5, payload_data(46, 1)), None))
+    test_frames.insert(5, (l2_frame(BCAST, HOST_MAC, 0x0800, payload_data(1500, 2)), None))
+
+    for frame, _ in test_frames:
+        await source.send(GmiiFrame.from_payload(frame))
+
+    for _, echo in test_frames:
+        if echo is None:
+            continue
+
+        rx_frame = await with_timeout(sink.recv(), 100, 'us')
 
         tb.log.info("RX frame: %s", rx_frame)
 
-        assert rx_frame.get_payload() == pkts[k]
+        assert rx_frame.get_payload() == echo
         assert rx_frame.check_fcs()
         assert rx_frame.error is None
 
-    tb.log.info("Multiple large packets")
+    # nothing else may come back
+    for k in range(2000):
+        await RisingEdge(tb.dut.clk)
 
-    count = 32
+    assert sink.empty()
 
-    pkts = [bytearray([(x+k) % 256 for x in range(1514)]) for k in range(count)]
-
-    for p in pkts:
-        await source.send(GmiiFrame.from_payload(p))
-
-    for k in range(count):
-        rx_frame = await sink.recv()
-
-        tb.log.info("RX frame: %s", rx_frame)
-
-        assert rx_frame.get_payload() == pkts[k]
-        assert rx_frame.check_fcs()
-        assert rx_frame.error is None
-
-    tb.log.info("MAC test done")
-
-
-async def vlan_test(tb, source, sink):
-    tb.log.info("Full-size 802.1Q tagged packet")
-
-    # 1518 bytes with the tag, 1522 on the wire with the FCS; an oversize drop
-    # must fail the test rather than hang it
-    hdr = bytes.fromhex('ffffffffffff' '5a5152535455' '8100' '0064' '22f0')
-    pkt = bytearray(hdr + bytes(k % 256 for k in range(1518 - len(hdr))))
-
-    await source.send(GmiiFrame.from_payload(pkt))
-
-    rx_frame = await with_timeout(sink.recv(), 100, 'us')
-
-    assert rx_frame.get_payload() == pkt
-    assert rx_frame.check_fcs()
-    assert rx_frame.error is None
+    return len(test_frames), sum(1 for _, echo in test_frames if echo is not None)
 
 
 @cocotb.test()
@@ -123,15 +127,12 @@ async def run_test(dut):
 
     await tb.init()
 
-    tb.log.info("Start BASE-T MAC loopback test")
-
-    await mac_test(tb, tb.baset_phy.rx, tb.baset_phy.tx)
-    await vlan_test(tb, tb.baset_phy.rx, tb.baset_phy.tx)
+    rx_count, tx_count = await avtp_echo_test(tb, tb.baset_phy.rx, tb.baset_phy.tx)
 
     # the counters read over the VIO on hardware must agree with the traffic
     status = dut.ctrl_status_inst
-    assert status.rx_good_cnt_reg.value.integer == 97
-    assert status.tx_good_cnt_reg.value.integer == 97
+    assert status.rx_good_cnt_reg.value.integer == rx_count
+    assert status.tx_good_cnt_reg.value.integer == tx_count
     assert status.rx_bad_fcs_cnt_reg.value.integer == 0
     assert status.rx_bad_frame_cnt_reg.value.integer == 0
 
@@ -168,6 +169,9 @@ def test_fpga_core(request):
     verilog_sources = [
         os.path.join(rtl_dir, f"{dut}.sv"),
         os.path.join(rtl_dir, "ctrl_status.sv"),
+        os.path.join(rtl_dir, "avtp_echo.sv"),
+        os.path.join(taxi_src_dir, "minerva", "rtl", "minerva_rx_parse.sv"),
+        os.path.join(taxi_src_dir, "minerva", "rtl", "minerva_tx_deparse.sv"),
         os.path.join(taxi_src_dir, "eth", "rtl", "taxi_eth_mac_1g_rgmii_fifo.f"),
         os.path.join(taxi_src_dir, "phy", "adin1300", "rtl", "phy_management.f"),
         os.path.join(taxi_src_dir, "axis", "rtl", "taxi_axis_null_snk.sv"),
