@@ -28,8 +28,8 @@ pin carrying TXD_3.
 
 ## RGMII and management pinout
 
-Connector pin → net from `adin1300fmcz_ASP-134604-01_pinout.csv`; LA name →
-package pin from `../Zedboard-Master.xdc`. All `LVCMOS25`.
+Connector pin → net from `src/phy/adin1300/docs/adin1300fmcz_ASP-134604-01_pinout.csv`;
+LA name → package pin from `../Zedboard-Master.xdc`. All `LVCMOS25`.
 
 | Function | FMC | LA name | Package | Bank | Clock region |
 |---|---|---|---|---|---|
@@ -81,7 +81,9 @@ specifies 1.5–2.0 ns. Here it comes from the FPGA's BUFG insertion delay on th
 recovered receive clock, which the bank split forces. With the PHY's 2 ns on top
 the total is roughly a whole 4 ns bit period and nothing decodes. Measured: with
 `GE_RGMII_RX_ID_EN` set, zero frames at every `GE_RGMII_RX_SEL` value; cleared,
-frames arrive with zero FCS errors. `phy_init` writes 0x0E03 after the scan.
+frames arrive with zero FCS errors. `phy_init` writes 0x0E03 after the scan,
+as a Clause 45 address and write to device 0x1E (confirmed on hardware
+2026-09-28).
 
 `GE_RGMII_RX_SEL` (bits [8:6]) had no observable effect either way — too fine a
 trim to matter against a 2 ns step.
@@ -95,14 +97,22 @@ trim to matter against a 2 ns step.
 | Ready after RESET_N release | 5 ms |
 
 Straps are sampled on the rising edge of RESET_N, so that edge must be clean.
+
+INT_N (pin 22, `INT_N/CRS`; INT_N in RGMII mode) is active low and needs a
+1.5 kΩ pull-up to VDDIO, which the card fits. It asserts only for sources
+enabled in `IRQ_MASK` (0x18) — all masked at reset, with bit 0 `HW_IRQ_EN`
+enabling the pin itself. `IRQ_STATUS` (0x19) latches every event, enabled or
+not, and clears on read; only enabled sources set `IRQ_PENDING` (bit 0).
+Confirmed on hardware 2026-09-29.
 The MDIO address straps `PHYAD_0`–`PHYAD_3` are multiplexed onto `RXD_0`–`RXD_3`,
 so the address is set by resistors on the eval card; address 0 means none fitted.
 
 Extended management interface and subsystem registers live at MMD address 0x1E.
-Two ways in: Clause 45 addressing 0x1E directly, or — for hosts without Clause 45
-— indirectly through `EXT_REG_PTR` (0x10) and `EXT_REG_DATA` (0x11) using
-Clause 22. `taxi_mdio_master` drives ST/OP raw, so either works. That is the
-path to the frame generator and checker used by L1a/L1b.
+Two ways in: Clause 45 addressing 0x1E directly — the datasheet's primary
+route, used by `phy_init` — or, for hosts without Clause 45, indirectly through
+`EXT_REG_PTR` (0x10) and `EXT_REG_DATA` (0x11) using Clause 22.
+`taxi_mdio_master` drives ST/OP raw, so either works. The VIO request port
+(`mdio_cmd`) issues Clause 22 frames only.
 
 ## UART
 
@@ -112,5 +122,6 @@ serial needs either a Pmod USB-serial adapter or a path through the PS.
 
 ## Reference documents
 
-`../adin1300fmcz/` holds the ADIN1300 datasheet and EVAL-ADIN1300FMCZ user
-guide, the Zedboard schematic, and the connector pinout crops.
+`src/phy/adin1300/docs/` holds the ADIN1300 datasheet and EVAL-ADIN1300FMCZ
+user guide (PDF and text dumps), the FMC pinout, and the connector schematic
+crops. The Zedboard schematic is not kept in the repo.
