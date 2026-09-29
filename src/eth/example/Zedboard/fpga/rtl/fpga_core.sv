@@ -41,6 +41,12 @@ module fpga_core #
     output wire logic [7:0]  led,
 
     /*
+     * UART: 921600 bps, 8N1
+     */
+    input  wire logic        uart_rxd,
+    output wire logic        uart_txd,
+
+    /*
      * Ethernet: 1000BASE-T RGMII
      */
     input  wire logic        phy_rx_clk,
@@ -60,6 +66,9 @@ module fpga_core #
     output wire logic [4:0]  phy_rx_idelay_value,
     output wire logic        phy_rx_idelay_load
 );
+
+// UART loopback, a test fixture until XFCP is added
+assign uart_txd = uart_rxd;
 
 // PHY management
 wire [4:0]  phy_addr;

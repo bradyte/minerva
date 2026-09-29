@@ -22,6 +22,7 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, with_timeout
 
 from cocotbext.eth import GmiiFrame, RgmiiPhy
+from cocotbext.uart import UartSource, UartSink
 
 
 class TB:
@@ -35,6 +36,9 @@ class TB:
 
         self.baset_phy = RgmiiPhy(dut.phy_txd, dut.phy_tx_ctl, dut.phy_tx_clk,
             dut.phy_rxd, dut.phy_rx_ctl, dut.phy_rx_clk, speed=speed)
+
+        self.uart_source = UartSource(dut.uart_rxd, baud=921600, bits=8, stop_bits=1)
+        self.uart_sink = UartSink(dut.uart_txd, baud=921600, bits=8, stop_bits=1)
 
         # no PHY management model: MDIO idles high, as the pull-up leaves it
         dut.phy_int_n.setimmediatevalue(1)
@@ -143,6 +147,14 @@ async def run_test(dut):
         await RisingEdge(dut.clk)
     assert status.phy_irq.value.integer == 1
     dut.phy_int_n.value = 1
+
+    # UART loopback, until XFCP is added
+    data = b'taxi'
+    await tb.uart_source.write(data)
+    rx_data = bytearray()
+    while len(rx_data) < len(data):
+        rx_data.extend(await with_timeout(tb.uart_sink.read(), 100, 'us'))
+    assert rx_data == data
 
     await RisingEdge(dut.clk)
     await RisingEdge(dut.clk)

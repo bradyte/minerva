@@ -39,6 +39,12 @@ module fpga #
     output wire logic [7:0]  led,
 
     /*
+     * UART: 921600 bps, 8N1
+     */
+    input  wire logic        uart_rxd,
+    output wire logic        uart_txd,
+
+    /*
      * Ethernet: 1000BASE-T RGMII
      */
     input  wire logic        phy_rx_clk,
@@ -168,6 +174,18 @@ sync_reset_inst (
     .out(rst_int)
 );
 
+wire uart_rxd_int;
+
+taxi_sync_signal #(
+    .WIDTH(1),
+    .N(2)
+)
+sync_signal_inst (
+    .clk(clk_int),
+    .in(uart_rxd),
+    .out(uart_rxd_int)
+);
+
 // IODELAY elements for RGMII interface to PHY
 // VAR_LOAD so the tap can be re-swept over JTAG
 wire [3:0] phy_rxd_int;
@@ -256,6 +274,12 @@ core_inst (
      * GPIO
      */
     .led(led),
+
+    /*
+     * UART: 921600 bps, 8N1
+     */
+    .uart_rxd(uart_rxd_int),
+    .uart_txd(uart_txd),
 
     /*
      * Ethernet: 1000BASE-T RGMII

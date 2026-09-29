@@ -36,3 +36,12 @@ set_property -dict {PACKAGE_PIN U14 IOSTANDARD LVCMOS33} [get_ports {led[7]}]
 
 set_false_path -to [get_ports {led[*]}]
 set_output_delay 0 [get_ports {led[*]}]
+
+# UART: Pmod JA, bank 13.  The pull-up idles RXD when the adapter is unplugged.
+set_property -dict {PACKAGE_PIN AA11 IOSTANDARD LVCMOS33 SLEW SLOW DRIVE 8} [get_ports {uart_txd}] ;# JA2
+set_property -dict {PACKAGE_PIN Y11  IOSTANDARD LVCMOS33 PULLUP true} [get_ports {uart_rxd}] ;# JA1
+
+set_false_path -to [get_ports {uart_txd}]
+set_output_delay 0 [get_ports {uart_txd}]
+set_false_path -from [get_ports {uart_rxd}]
+set_input_delay 0 [get_ports {uart_rxd}]
