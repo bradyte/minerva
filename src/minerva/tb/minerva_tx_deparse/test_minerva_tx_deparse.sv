@@ -26,8 +26,8 @@ module test_minerva_tx_deparse #
 logic clk;
 logic rst;
 
-taxi_axis_if #(.DATA_W(32)) s_axis();
-taxi_axis_if #(.DATA_W(32), .USER_EN(1), .USER_W(1)) m_axis();
+taxi_axis_if #(.DATA_W(32)) s_axis_eth_tx();
+taxi_axis_if #(.DATA_W(32), .USER_EN(1), .USER_W(1)) m_axis_mac_tx();
 
 minerva_tx_deparse #(
     .LOCAL_MAC(LOCAL_MAC)
@@ -39,12 +39,12 @@ uut (
     /*
      * Payload input, destination and ethertype prefixed
      */
-    .s_axis(s_axis),
+    .s_axis_eth_tx(s_axis_eth_tx),
 
     /*
      * Frame output, to the MAC
      */
-    .m_axis(m_axis)
+    .m_axis_mac_tx(m_axis_mac_tx)
 );
 
 endmodule

@@ -27,8 +27,8 @@ module test_minerva_rx_parse #
 logic clk;
 logic rst;
 
-taxi_axis_if #(.DATA_W(32), .USER_EN(1), .USER_W(1)) s_axis();
-taxi_axis_if #(.DATA_W(32), .DEST_EN(1), .DEST_W(DEST_W)) m_axis();
+taxi_axis_if #(.DATA_W(32), .USER_EN(1), .USER_W(1)) s_axis_mac_rx();
+taxi_axis_if #(.DATA_W(32), .DEST_EN(1), .DEST_W(DEST_W)) m_axis_eth_rx();
 
 minerva_rx_parse #(
     .VLAN_EN(VLAN_EN)
@@ -40,12 +40,12 @@ uut (
     /*
      * Frame input, from the MAC
      */
-    .s_axis(s_axis),
+    .s_axis_mac_rx(s_axis_mac_rx),
 
     /*
      * Payload output, route on tdest
      */
-    .m_axis(m_axis)
+    .m_axis_eth_rx(m_axis_eth_rx)
 );
 
 endmodule

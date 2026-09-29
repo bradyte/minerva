@@ -40,8 +40,9 @@ except ImportError:
 ETHERTYPE_AVTP = 0x22F0
 ETHERTYPE_PTP = 0x88F7
 
-# demux port per routed ethertype, as in the RTL route table
-ROUTE = {ETHERTYPE_AVTP: 0, ETHERTYPE_PTP: 1}
+# demux port per routed ethertype, as in the RTL route table; PTP has no
+# route yet, so it is dropped
+ROUTE = {ETHERTYPE_AVTP: 0}
 
 
 class TB(object):
@@ -53,8 +54,8 @@ class TB(object):
 
         cocotb.start_soon(Clock(dut.clk, 8, units="ns").start())
 
-        self.source = AxiStreamSource(AxiStreamBus.from_entity(dut.s_axis), dut.clk, dut.rst)
-        self.sink = AxiStreamSink(AxiStreamBus.from_entity(dut.m_axis), dut.clk, dut.rst)
+        self.source = AxiStreamSource(AxiStreamBus.from_entity(dut.s_axis_mac_rx), dut.clk, dut.rst)
+        self.sink = AxiStreamSink(AxiStreamBus.from_entity(dut.m_axis_eth_rx), dut.clk, dut.rst)
 
         cocotb.start_soon(check_axis_stable(self.sink.bus, dut.clk, dut.rst))
 
@@ -106,7 +107,7 @@ async def run_test_route(dut, idle_inserter=None, backpressure_inserter=None):
 
     test_frames = []
 
-    for ethertype in (ETHERTYPE_AVTP, ETHERTYPE_PTP):
+    for ethertype in ROUTE:
         for vlan in (None, 'c', 's'):
             for n in list(range(46, 54)) + [1500]:
                 payload = payload_data(n, len(test_frames))
@@ -147,7 +148,8 @@ async def run_test_drop(dut, idle_inserter=None, backpressure_inserter=None):
         (l2_frame(0x0806, payload_data(46, 3), vlan='c'), None, None),
         # a second tag is not accepted
         (bytes(Ether() / Dot1AD(vlan=456) / Dot1Q(vlan=123, type=ETHERTYPE_AVTP) / Raw(payload_data(46, 4))), None, None),
-        (l2_frame(ETHERTYPE_PTP, payload_data(50, 5), vlan='c'), payload_data(50, 5), ROUTE[ETHERTYPE_PTP]),
+        (l2_frame(ETHERTYPE_PTP, payload_data(46, 8)), None, None),
+        (l2_frame(ETHERTYPE_AVTP, payload_data(50, 5), vlan='c'), payload_data(50, 5), ROUTE[ETHERTYPE_AVTP]),
         # runts ending inside the addresses, at the ethertype, and inside the
         # ethertype word
         (hdr[:10], None, None),
