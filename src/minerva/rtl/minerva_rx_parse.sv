@@ -13,13 +13,15 @@ Authors:
 `default_nettype none
 
 /*
- * Minerva L2 stack - RX parser
+ * Minerva RX parser
  *
- * Removes the L2 header, including one optional VLAN tag, and routes the
- * payload by ethertype.  The route goes out on tdest, for a taxi_axis_demux
- * with TDEST_ROUTE set, and the payload starts at lane 0.  Frames whose
- * ethertype is not in the route table, or that end inside the header, are
- * dropped.
+ * Parses Ethernet, including one optional VLAN tag, then AVTP, NTSCF, ACF and
+ * ABB, and emits one packet per ABB message: a four-word record of header
+ * values, then the payload.  The format code goes out on tid and the route on
+ * tdest.  Frames it cannot parse are dropped.
+ *
+ * So far only an ABB message without a payload, first in its PDU, is emitted;
+ * a payload or a later message drops the rest of the frame.
  *
  * Bad frames must already be gone: tuser is not examined, so the MAC's RX
  * FIFO needs DROP_BAD_FRAME.
@@ -39,12 +41,13 @@ module minerva_rx_parse #
     taxi_axis_if.snk   s_axis_mac_rx,
 
     /*
-     * Payload output, route on tdest
+     * Message output: record, then payload
      */
     taxi_axis_if.src   m_axis_eth_rx
 );
 
 localparam DATA_W = s_axis_mac_rx.DATA_W;
+localparam ID_W = m_axis_eth_rx.ID_W;
 localparam DEST_W = m_axis_eth_rx.DEST_W;
 
 // check configuration
@@ -57,6 +60,9 @@ if (m_axis_eth_rx.DATA_W != DATA_W)
 if (!s_axis_mac_rx.KEEP_EN || !m_axis_eth_rx.KEEP_EN)
     $fatal(0, "Error: Interfaces require KEEP_EN (instance %m)");
 
+if (!m_axis_eth_rx.ID_EN)
+    $fatal(0, "Error: Output requires ID_EN (instance %m)");
+
 if (!m_axis_eth_rx.DEST_EN)
     $fatal(0, "Error: Output requires DEST_EN (instance %m)");
 
@@ -66,28 +72,61 @@ typedef enum logic [15:0] {
     ETHERTYPE_VLAN_S = 16'h88A8
 } ethertype_t;
 
+typedef enum logic [7:0] {
+    SUBTYPE_NTSCF = 8'h82
+} subtype_t;
+
+typedef enum logic [6:0] {
+    ACF_MSG_TYPE_ABB = 7'h0E
+} acf_msg_type_t;
+
 // demux port for each routed ethertype
 localparam logic [DEST_W-1:0] ROUTE_AVTP = DEST_W'(0);
 
-typedef enum logic [2:0] {
-    STATE_HDR,
+// format code for each record layout
+localparam logic [ID_W-1:0] FORMAT_ABB = ID_W'(0);
+
+typedef enum logic [3:0] {
+    STATE_ETH,
     STATE_VLAN,
-    STATE_PASS,
-    STATE_FLUSH,
+    STATE_AVTP,
+    STATE_NTSCF_1,
+    STATE_NTSCF_2,
+    STATE_ACF,
+    STATE_ABB_1,
+    STATE_RECORD,
     STATE_DROP
 } state_t;
 
-state_t state_reg = STATE_HDR, state_next;
+state_t state_reg = STATE_ETH, state_next;
 
-// words consumed since start of frame, held once the header is done
+// words of the L2 header consumed, then the record word being sent
 logic [2:0] ptr_reg = '0, ptr_next;
-logic [1:0] flush_keep_reg = '0, flush_keep_next;
 logic [DEST_W-1:0] route_reg = '0, route_next;
+
+// bytes of ACF messages still to come in the NTSCF payload
+logic [10:0] data_rem_reg = '0, data_rem_next;
+// the frame ended with the message, so there is nothing left to drop
+logic frame_end_reg = 1'b0, frame_end_next;
+
+// record fields
+logic [63:0] stream_id_reg = '0, stream_id_next;
+logic [7:0]  seq_num_reg = '0, seq_num_next;
+logic        sv_reg = 1'b0, sv_next;
+logic        mtv_reg = 1'b0, mtv_next;
+logic [10:0] byte_bus_id_reg = '0, byte_bus_id_next;
+logic [10:0] payload_len_reg = '0, payload_len_next;
+logic [31:0] abb_1_reg = '0, abb_1_next;
 
 // the header is 14 or 18 bytes, both two past a word boundary, so holding two
 // bytes back from each word puts the payload at lane 0
 logic [15:0] shift_reg = '0;
 wire [31:0] shifted = {s_axis_mac_rx.tdata[15:0], shift_reg};
+
+// the shifted word as a 1722 quadlet: lane 0 is first on the wire, so it is
+// the most significant byte, and a field at bit offset o of width w is
+// quad[31-o -: w]
+wire [31:0] quad = {shifted[7:0], shifted[15:8], shifted[23:16], shifted[31:24]};
 
 // the ethertype is lanes 0 and 1 of word 3, or of word 4 when a tag is
 // present; lane 0 is first on the wire, so it is the most significant byte
@@ -98,9 +137,19 @@ wire [2:0] in_keep = s_axis_mac_rx.tkeep[3] ? 3'd4 :
                      s_axis_mac_rx.tkeep[2] ? 3'd3 :
                      s_axis_mac_rx.tkeep[1] ? 3'd2 : 3'd1;
 
-// a final word of 3 or 4 bytes leaves bytes behind in the shift register
-wire [2:0] out_keep_last = in_keep >= 3'd2 ? 3'd4 : 3'd3;
-wire tail_pending = in_keep >= 3'd3;
+// AVTP common header, in AVTP word 0
+wire [7:0] avtp_subtype = quad[31:24];
+wire [2:0] avtp_version = quad[22:20];
+
+// ACF common header and the first ABB fields, in ACF word 0; the message
+// length is in quadlets, header included
+wire [6:0]  acf_msg_type = quad[31:25];
+wire [10:0] acf_msg_bytes = {quad[24:16], 2'b00};
+wire [1:0]  acf_pad = quad[15:14];
+wire [10:0] acf_payload_len = acf_msg_bytes - 11'd8 - 11'(acf_pad);
+
+// the message holds its header and pad, and fits in the NTSCF payload
+wire acf_len_ok = acf_msg_bytes >= 11'd8 + 11'(acf_pad) && acf_msg_bytes <= data_rem_reg;
 
 // handle ethertype: the route table
 state_t eth_type_state;
@@ -115,12 +164,24 @@ always_comb begin
             eth_type_state = VLAN_EN ? STATE_VLAN : STATE_DROP;
         end
         ETHERTYPE_AVTP: begin
-            eth_type_state = STATE_PASS;
+            eth_type_state = STATE_AVTP;
             eth_type_route = ROUTE_AVTP;
         end
         default: begin
             eth_type_state = STATE_DROP;
         end
+    endcase
+end
+
+// record words, sent in order
+logic [31:0] record_word;
+
+always_comb begin
+    case (ptr_reg[1:0])
+        2'd0: record_word = stream_id_reg[63:32];
+        2'd1: record_word = stream_id_reg[31:0];
+        2'd2: record_word = {seq_num_reg, mtv_reg, byte_bus_id_reg, sv_reg, payload_len_reg};
+        default: record_word = abb_1_reg;
     endcase
 end
 
@@ -137,7 +198,7 @@ assign m_axis_eth_rx.tkeep  = m_axis_eth_rx_tkeep_int;
 assign m_axis_eth_rx.tstrb  = m_axis_eth_rx.tkeep;
 assign m_axis_eth_rx.tvalid = m_axis_eth_rx_tvalid_int;
 assign m_axis_eth_rx.tlast  = m_axis_eth_rx_tlast_int;
-assign m_axis_eth_rx.tid    = '0;
+assign m_axis_eth_rx.tid    = FORMAT_ABB;
 assign m_axis_eth_rx.tdest  = route_reg;
 assign m_axis_eth_rx.tuser  = '0;
 
@@ -145,24 +206,33 @@ always_comb begin
     state_next = state_reg;
 
     ptr_next = ptr_reg;
-    flush_keep_next = flush_keep_reg;
     route_next = route_reg;
+    data_rem_next = data_rem_reg;
+    frame_end_next = frame_end_reg;
+
+    stream_id_next = stream_id_reg;
+    seq_num_next = seq_num_reg;
+    sv_next = sv_reg;
+    mtv_next = mtv_reg;
+    byte_bus_id_next = byte_bus_id_reg;
+    payload_len_next = payload_len_reg;
+    abb_1_next = abb_1_reg;
 
     s_axis_mac_rx_tready_int = 1'b1;
-    m_axis_eth_rx_tdata_int = shifted;
+    m_axis_eth_rx_tdata_int = record_word;
     m_axis_eth_rx_tkeep_int = 4'b1111;
     m_axis_eth_rx_tvalid_int = 1'b0;
     m_axis_eth_rx_tlast_int = 1'b0;
 
     case (state_reg)
-        STATE_HDR: begin
+        STATE_ETH: begin
             // words 0 to 2 are addresses; the ethertype decides at word 3
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
                 ptr_next = ptr_reg + 1;
 
                 if (s_axis_mac_rx.tlast) begin
                     ptr_next = '0;
-                    state_next = STATE_HDR;
+                    state_next = STATE_ETH;
                 end else if (ptr_reg == 3'd3) begin
                     route_next = eth_type_route;
                     state_next = eth_type_state;
@@ -175,7 +245,7 @@ always_comb begin
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
                 if (s_axis_mac_rx.tlast) begin
                     ptr_next = '0;
-                    state_next = STATE_HDR;
+                    state_next = STATE_ETH;
                 end else begin
                     // one tag only, so a second one is dropped
                     route_next = eth_type_route;
@@ -183,46 +253,110 @@ always_comb begin
                 end
             end
         end
-        STATE_PASS: begin
-            // one shifted word out per word in
-            s_axis_mac_rx_tready_int = m_axis_eth_rx.tready;
-            m_axis_eth_rx_tvalid_int = s_axis_mac_rx.tvalid;
+        STATE_AVTP: begin
+            // AVTP common header and the first NTSCF fields; only version 0
+            // NTSCF is parsed
+            if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
+                sv_next = quad[23];
+                data_rem_next = quad[18:8];
+                seq_num_next = quad[7:0];
 
-            if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tlast) begin
-                m_axis_eth_rx_tkeep_int = 4'((1 << out_keep_last) - 1);
-                m_axis_eth_rx_tlast_int = !tail_pending;
-            end
-
-            if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready && s_axis_mac_rx.tlast) begin
-                ptr_next = '0;
-                if (tail_pending) begin
-                    flush_keep_next = 2'(in_keep - 3'd2);
-                    state_next = STATE_FLUSH;
+                if (s_axis_mac_rx.tlast) begin
+                    ptr_next = '0;
+                    state_next = STATE_ETH;
+                end else if (avtp_subtype == SUBTYPE_NTSCF && avtp_version == 3'd0) begin
+                    state_next = STATE_NTSCF_1;
                 end else begin
-                    state_next = STATE_HDR;
+                    state_next = STATE_DROP;
                 end
             end
         end
-        STATE_FLUSH: begin
-            // the bytes the shift register still holds after tlast
+        STATE_NTSCF_1: begin
+            if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
+                stream_id_next[63:32] = quad;
+
+                if (s_axis_mac_rx.tlast) begin
+                    ptr_next = '0;
+                    state_next = STATE_ETH;
+                end else begin
+                    state_next = STATE_NTSCF_2;
+                end
+            end
+        end
+        STATE_NTSCF_2: begin
+            if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
+                stream_id_next[31:0] = quad;
+
+                if (s_axis_mac_rx.tlast) begin
+                    ptr_next = '0;
+                    state_next = STATE_ETH;
+                end else if (data_rem_reg == 0) begin
+                    // no ACF messages
+                    state_next = STATE_DROP;
+                end else begin
+                    state_next = STATE_ACF;
+                end
+            end
+        end
+        STATE_ACF: begin
+            // ACF common header and the first ABB fields; every length check
+            // resolves here, before anything is sent
+            if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
+                mtv_next = quad[13];
+                byte_bus_id_next = quad[10:0];
+                payload_len_next = acf_payload_len;
+                data_rem_next = data_rem_reg - acf_msg_bytes;
+
+                if (s_axis_mac_rx.tlast) begin
+                    ptr_next = '0;
+                    state_next = STATE_ETH;
+                end else if (acf_msg_type == ACF_MSG_TYPE_ABB && acf_len_ok && acf_payload_len == 0) begin
+                    state_next = STATE_ABB_1;
+                end else begin
+                    // unknown or malformed, or a payload, not handled yet
+                    state_next = STATE_DROP;
+                end
+            end
+        end
+        STATE_ABB_1: begin
+            // the second ABB quadlet is record word 3 as it stands
+            if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
+                abb_1_next = quad;
+                ptr_next = '0;
+                frame_end_next = s_axis_mac_rx.tlast;
+
+                if (s_axis_mac_rx.tlast && in_keep < 3'd2) begin
+                    // the frame ended inside this quadlet
+                    state_next = STATE_ETH;
+                end else begin
+                    state_next = STATE_RECORD;
+                end
+            end
+        end
+        STATE_RECORD: begin
+            // the record goes out while the input waits
             s_axis_mac_rx_tready_int = 1'b0;
-            m_axis_eth_rx_tdata_int = {16'd0, shift_reg};
-            m_axis_eth_rx_tkeep_int = flush_keep_reg == 2'd2 ? 4'b0011 : 4'b0001;
             m_axis_eth_rx_tvalid_int = 1'b1;
-            m_axis_eth_rx_tlast_int = 1'b1;
+            m_axis_eth_rx_tlast_int = ptr_reg == 3'd3;
 
             if (m_axis_eth_rx.tready) begin
-                state_next = STATE_HDR;
+                ptr_next = ptr_reg + 1;
+
+                if (ptr_reg == 3'd3) begin
+                    ptr_next = '0;
+                    // a later message is not handled yet
+                    state_next = frame_end_reg ? STATE_ETH : STATE_DROP;
+                end
             end
         end
         STATE_DROP: begin
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready && s_axis_mac_rx.tlast) begin
                 ptr_next = '0;
-                state_next = STATE_HDR;
+                state_next = STATE_ETH;
             end
         end
         default: begin
-            state_next = STATE_HDR;
+            state_next = STATE_ETH;
         end
     endcase
 end
@@ -231,18 +365,27 @@ always_ff @(posedge clk) begin
     state_reg <= state_next;
 
     ptr_reg <= ptr_next;
-    flush_keep_reg <= flush_keep_next;
     route_reg <= route_next;
+    data_rem_reg <= data_rem_next;
+    frame_end_reg <= frame_end_next;
+
+    stream_id_reg <= stream_id_next;
+    seq_num_reg <= seq_num_next;
+    sv_reg <= sv_next;
+    mtv_reg <= mtv_next;
+    byte_bus_id_reg <= byte_bus_id_next;
+    payload_len_reg <= payload_len_next;
+    abb_1_reg <= abb_1_next;
 
     if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
         shift_reg <= s_axis_mac_rx.tdata[31:16];
     end
 
     if (rst) begin
-        state_reg <= STATE_HDR;
+        state_reg <= STATE_ETH;
         ptr_reg <= '0;
-        flush_keep_reg <= '0;
         route_reg <= '0;
+        frame_end_reg <= 1'b0;
         shift_reg <= '0;
     end
 end

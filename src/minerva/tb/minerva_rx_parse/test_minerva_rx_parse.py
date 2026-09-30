@@ -28,11 +28,13 @@ from cocotbext.axi import AxiStreamBus, AxiStreamSource, AxiStreamSink
 
 try:
     from axis_stable import check_axis_stable
+    import avtp
 except ImportError:
     # attempt import from current directory
     sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
     try:
         from axis_stable import check_axis_stable
+        import avtp
     finally:
         del sys.path[0]
 
@@ -40,9 +42,8 @@ except ImportError:
 ETHERTYPE_AVTP = 0x22F0
 ETHERTYPE_PTP = 0x88F7
 
-# demux port per routed ethertype, as in the RTL route table; PTP has no
-# route yet, so it is dropped
-ROUTE = {ETHERTYPE_AVTP: 0}
+# demux port for AVTP, as in the RTL route table
+ROUTE_AVTP = 0
 
 
 class TB(object):
@@ -91,12 +92,29 @@ def l2_frame(ethertype, payload, vlan=None):
     return bytes(pkt / Raw(payload))
 
 
-def payload_data(n, seed):
-    return bytes((seed + k) & 0xff for k in range(n))
+def eth_pad(frame):
+    """Pad to the 60-byte minimum, as the talker's MAC would."""
+    return frame + bytes(max(0, 60 - len(frame)))
 
 
-async def run_test_route(dut, idle_inserter=None, backpressure_inserter=None):
-    """Every routed ethertype, tagged or not, at every tail alignment."""
+def abb_request(k, sv=1):
+    """An ABB message without a payload, with fields varied by k: its
+    stream_id, sequence_num, the message, and the record it gives."""
+    stream_id = (0x0200_0000_0000 | (k & 0xff)) << 16 | (0x1000 + k)
+    sequence_num = (0xfd + k) & 0xff
+    byte_bus_id = (0x5ff + 0x123 * k) & 0x7ff
+    mtv = k & 1
+    word1 = avtp.abb_word1(evt=k & 0xf, hs=k & 1, cs=(k >> 1) & 1,
+                           transaction_num=(0x40 + k) & 0xff, op=(k >> 2) & 1,
+                           rsp=(k >> 3) & 1, err=(k >> 1) & 1, ms=k & 1,
+                           read_size=(0xbff - k) & 0xfff)
+    msg = avtp.abb_message(byte_bus_id, mtv, word1)
+    rec = avtp.abb_record(stream_id, sequence_num, byte_bus_id, word1, 0, sv=sv, mtv=mtv)
+    return stream_id, sequence_num, msg, rec
+
+
+async def run_test_record(dut, idle_inserter=None, backpressure_inserter=None):
+    """An ABB message without a payload gives a record-only packet."""
 
     tb = TB(dut)
 
@@ -105,22 +123,34 @@ async def run_test_route(dut, idle_inserter=None, backpressure_inserter=None):
     tb.set_idle_generator(idle_inserter)
     tb.set_backpressure_generator(backpressure_inserter)
 
+    # the builder against the vectors in Open1722's unit/test-abb.c
+    assert avtp.abb_message(byte_bus_id=0x5ff)[:4] == bytes([0x1c, 0x02, 0x05, 0xff])
+    assert avtp.abb_message(word1=avtp.abb_word1(evt=0xb))[4] == 0xb0
+    assert avtp.abb_message(word1=avtp.abb_word1(transaction_num=0xbf))[5] == 0xbf
+    assert avtp.abb_message(word1=avtp.abb_word1(op=1))[6] == 0x80
+    assert avtp.abb_message(word1=avtp.abb_word1(read_size=0xbff))[6:8] == bytes([0x0b, 0xff])
+
     test_frames = []
 
-    for ethertype in ROUTE:
-        for vlan in (None, 'c', 's'):
-            for n in list(range(46, 54)) + [1500]:
-                payload = payload_data(n, len(test_frames))
-                test_frames.append((l2_frame(ethertype, payload, vlan), payload, ROUTE[ethertype]))
+    # tagged or not, sv set or not, and with or without the Ethernet padding
+    # that follows a short PDU
+    for vlan, sv, pad in itertools.product((None, 'c', 's'), (1, 0), (True, False)):
+        stream_id, sequence_num, msg, rec = abb_request(len(test_frames), sv)
+        frame = l2_frame(ETHERTYPE_AVTP, avtp.ntscf_pdu(stream_id, sequence_num, [msg], sv=sv), vlan)
+        if pad:
+            frame = eth_pad(frame)
+        test_frames.append((frame, rec))
 
-    for frame, _, _ in test_frames:
+    for frame, _ in test_frames:
         await tb.source.send(frame)
 
-    for _, payload, route in test_frames:
+    for _, rec in test_frames:
         rx_frame = await tb.sink.recv()
 
-        assert bytes(rx_frame.tdata) == payload
-        assert rx_frame.tdest == route
+        assert bytes(rx_frame.tdata) == rec
+        assert rx_frame.tid == avtp.FORMAT_ABB
+        assert rx_frame.tdest == ROUTE_AVTP
+        assert not rx_frame.tuser
 
     assert tb.sink.empty()
 
@@ -129,7 +159,8 @@ async def run_test_route(dut, idle_inserter=None, backpressure_inserter=None):
 
 
 async def run_test_drop(dut, idle_inserter=None, backpressure_inserter=None):
-    """Unrouted and runt frames vanish without disturbing their neighbours."""
+    """Frames that cannot be parsed, or not yet, give nothing and leave their
+    neighbours intact."""
 
     tb = TB(dut)
 
@@ -138,38 +169,77 @@ async def run_test_drop(dut, idle_inserter=None, backpressure_inserter=None):
     tb.set_idle_generator(idle_inserter)
     tb.set_backpressure_generator(backpressure_inserter)
 
-    hdr = l2_frame(ETHERTYPE_AVTP, b'')
+    # (frame, record expected, or None if nothing may come out)
+    test_frames = []
 
-    # (frame, expected payload or None if dropped, route)
-    test_frames = [
-        (l2_frame(ETHERTYPE_AVTP, payload_data(46, 1)), payload_data(46, 1), ROUTE[ETHERTYPE_AVTP]),
-        # ethertype not in the route table
-        (l2_frame(0x0800, payload_data(46, 2)), None, None),
-        (l2_frame(0x0806, payload_data(46, 3), vlan='c'), None, None),
-        # a second tag is not accepted
-        (bytes(Ether() / Dot1AD(vlan=456) / Dot1Q(vlan=123, type=ETHERTYPE_AVTP) / Raw(payload_data(46, 4))), None, None),
-        (l2_frame(ETHERTYPE_PTP, payload_data(46, 8)), None, None),
-        (l2_frame(ETHERTYPE_AVTP, payload_data(50, 5), vlan='c'), payload_data(50, 5), ROUTE[ETHERTYPE_AVTP]),
-        # runts ending inside the addresses, at the ethertype, and inside the
-        # ethertype word
-        (hdr[:10], None, None),
-        (hdr, None, None),
-        (l2_frame(ETHERTYPE_AVTP, payload_data(2, 6)), None, None),
-        (l2_frame(ETHERTYPE_AVTP, b'', vlan='c'), None, None),
-        (l2_frame(ETHERTYPE_AVTP, payload_data(47, 7)), payload_data(47, 7), ROUTE[ETHERTYPE_AVTP]),
-    ]
+    def good():
+        stream_id, sequence_num, msg, rec = abb_request(len(test_frames))
+        pdu = avtp.ntscf_pdu(stream_id, sequence_num, [msg])
+        test_frames.append((eth_pad(l2_frame(ETHERTYPE_AVTP, pdu)), rec))
 
-    for frame, _, _ in test_frames:
+    def drop(frame):
+        test_frames.append((frame, None))
+
+    def avtp_frame(pdu):
+        return eth_pad(l2_frame(ETHERTYPE_AVTP, pdu))
+
+    stream_id = 0x0200_0000_0001_0001
+    msg = avtp.abb_message(byte_bus_id=0x123, word1=avtp.abb_word1(transaction_num=7))
+
+    good()
+
+    # ethertypes other than AVTP, and a second tag
+    drop(eth_pad(l2_frame(0x0800, avtp.ntscf_pdu(stream_id, 1, [msg]))))
+    drop(eth_pad(l2_frame(0x0806, avtp.ntscf_pdu(stream_id, 2, [msg]), vlan='c')))
+    drop(eth_pad(l2_frame(ETHERTYPE_PTP, avtp.ntscf_pdu(stream_id, 3, [msg]))))
+    drop(eth_pad(bytes(Ether() / Dot1AD(vlan=456) / Dot1Q(vlan=123, type=ETHERTYPE_AVTP) /
+        Raw(avtp.ntscf_pdu(stream_id, 4, [msg])))))
+
+    good()
+
+    # TSCF is deferred, only version 0 is parsed, and a PDU with no messages
+    drop(avtp_frame(avtp.ntscf_pdu(stream_id, 5, [msg], subtype=avtp.SUBTYPE_TSCF)))
+    drop(avtp_frame(avtp.ntscf_pdu(stream_id, 6, [msg], version=1)))
+    drop(avtp_frame(avtp.ntscf_pdu(stream_id, 7, [])))
+
+    # GBB is deferred; lengths below the header, too short for the pad, and
+    # past the NTSCF payload
+    drop(avtp_frame(avtp.ntscf_pdu(stream_id, 8, [avtp.abb_message(acf_msg_type=avtp.ACF_MSG_TYPE_GBB)])))
+    drop(avtp_frame(avtp.ntscf_pdu(stream_id, 9, [avtp.abb_message(acf_msg_length=1)])))
+    drop(avtp_frame(avtp.ntscf_pdu(stream_id, 10, [avtp.abb_message(pad=1)])))
+    drop(avtp_frame(avtp.ntscf_pdu(stream_id, 11, [avtp.abb_message(acf_msg_length=3)])))
+
+    good()
+
+    # a payload is not handled yet
+    drop(avtp_frame(avtp.ntscf_pdu(stream_id, 12, [avtp.abb_message(payload=b'\x01\x02\x03')])))
+
+    # a second message is not handled yet; the first still comes out
+    stream_id_2, sequence_num_2, msg_2, rec_2 = abb_request(len(test_frames))
+    test_frames.append((avtp_frame(avtp.ntscf_pdu(stream_id_2, sequence_num_2, [msg_2, msg])), rec_2))
+
+    # runts: frames ending inside or at the end of each header quadlet, and a
+    # byte short of the last
+    pdu = avtp.ntscf_pdu(stream_id, 13, [msg])
+    for n in (2, 4, 6, 8, 10, 12, 14, 16, 19):
+        drop(l2_frame(ETHERTYPE_AVTP, pdu[:n]))
+    drop(l2_frame(ETHERTYPE_AVTP, b'')[:10])
+    drop(l2_frame(ETHERTYPE_AVTP, b'', vlan='c'))
+
+    good()
+
+    for frame, _ in test_frames:
         await tb.source.send(frame)
 
-    for _, payload, route in test_frames:
-        if payload is None:
+    for _, rec in test_frames:
+        if rec is None:
             continue
 
         rx_frame = await tb.sink.recv()
 
-        assert bytes(rx_frame.tdata) == payload
-        assert rx_frame.tdest == route
+        assert bytes(rx_frame.tdata) == rec
+        assert rx_frame.tid == avtp.FORMAT_ABB
+        assert rx_frame.tdest == ROUTE_AVTP
 
     # let any wrongly forwarded frame surface
     await tb.source.wait()
@@ -185,7 +255,7 @@ def cycle_pause():
 
 if getattr(cocotb, 'top', None) is not None:
 
-    for test in [run_test_route, run_test_drop]:
+    for test in [run_test_record, run_test_drop]:
 
         factory = TestFactory(test)
         factory.add_option("idle_inserter", [None, cycle_pause])
@@ -230,6 +300,7 @@ def test_minerva_rx_parse(request):
     parameters = {}
 
     parameters['VLAN_EN'] = 1
+    parameters['ID_W'] = 4
     parameters['DEST_W'] = 1
 
     extra_env = {f'PARAM_{k}': str(v) for k, v in parameters.items()}
