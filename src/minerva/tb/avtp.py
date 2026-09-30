@@ -14,6 +14,7 @@ import struct
 SUBTYPE_NTSCF = 0x82
 SUBTYPE_TSCF = 0x05
 
+ACF_MSG_TYPE_CAN = 0x01
 ACF_MSG_TYPE_GBB = 0x0D
 ACF_MSG_TYPE_ABB = 0x0E
 
@@ -43,6 +44,15 @@ def abb_message(byte_bus_id=0, mtv=0, word1=0, payload=b'',
     return struct.pack('>II', word0, word1) + payload + bytes(fill)
 
 
+def acf_message(acf_msg_type, body=b'', acf_msg_length=None):
+    """An ACF message of any type: the common header quadlet, then the body and
+    zero bytes to a quadlet.  The rest of the first quadlet is left zero."""
+    fill = -len(body) % 4
+    if acf_msg_length is None:
+        acf_msg_length = (4 + len(body) + fill) // 4
+    return struct.pack('>I', acf_msg_type << 25 | acf_msg_length << 16) + body + bytes(fill)
+
+
 def ntscf_pdu(stream_id, sequence_num, messages, sv=1, version=0,
               subtype=SUBTYPE_NTSCF, ntscf_data_length=None):
     """An NTSCF AVTPDU carrying the given ACF messages back to back."""
@@ -58,3 +68,9 @@ def abb_record(stream_id, sequence_num, byte_bus_id, word1, payload_len, sv=1, m
     sink receives: each word is a value with bits 7:0 in lane 0."""
     word2 = sequence_num << 24 | mtv << 23 | byte_bus_id << 12 | sv << 11 | payload_len
     return struct.pack('<IIII', stream_id >> 32, stream_id & 0xffffffff, word2, word1)
+
+
+def abb_packet(stream_id, sequence_num, byte_bus_id, word1, payload, sv=1, mtv=0):
+    """The packet minerva sends for an ABB message: the record, then the
+    payload without its pad."""
+    return abb_record(stream_id, sequence_num, byte_bus_id, word1, len(payload), sv=sv, mtv=mtv) + payload

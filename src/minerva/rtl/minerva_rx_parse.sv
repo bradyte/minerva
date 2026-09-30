@@ -18,10 +18,11 @@ Authors:
  * Parses Ethernet, including one optional VLAN tag, then AVTP, NTSCF, ACF and
  * ABB, and emits one packet per ABB message: a four-word record of header
  * values, then the payload.  The format code goes out on tid and the route on
- * tdest.  Frames it cannot parse are dropped.
+ * tdest.  Other ACF messages are skipped, and frames it cannot parse are
+ * dropped.
  *
- * So far only an ABB message without a payload, first in its PDU, is emitted;
- * a payload or a later message drops the rest of the frame.
+ * A frame that ends inside a payload ends that packet with tuser set.  One
+ * that ends anywhere else before a message is complete gives nothing for it.
  *
  * Bad frames must already be gone: tuser is not examined, so the MAC's RX
  * FIFO needs DROP_BAD_FRAME.
@@ -66,6 +67,9 @@ if (!m_axis_eth_rx.ID_EN)
 if (!m_axis_eth_rx.DEST_EN)
     $fatal(0, "Error: Output requires DEST_EN (instance %m)");
 
+if (!m_axis_eth_rx.USER_EN)
+    $fatal(0, "Error: Output requires USER_EN (instance %m)");
+
 typedef enum logic [15:0] {
     ETHERTYPE_AVTP = 16'h22F0,
     ETHERTYPE_VLAN_C = 16'h8100,
@@ -95,6 +99,8 @@ typedef enum logic [3:0] {
     STATE_ACF,
     STATE_ABB_1,
     STATE_RECORD,
+    STATE_PAYLOAD,
+    STATE_SKIP,
     STATE_DROP
 } state_t;
 
@@ -106,6 +112,10 @@ logic [DEST_W-1:0] route_reg = '0, route_next;
 
 // bytes of ACF messages still to come in the NTSCF payload
 logic [10:0] data_rem_reg = '0, data_rem_next;
+// quadlets still to come in the current message
+logic [8:0] msg_rem_reg = '0, msg_rem_next;
+// pad bytes at the end of the current ABB message
+logic [1:0] pad_reg = '0, pad_next;
 // the frame ended with the message, so there is nothing left to drop
 logic frame_end_reg = 1'b0, frame_end_next;
 
@@ -137,6 +147,9 @@ wire [2:0] in_keep = s_axis_mac_rx.tkeep[3] ? 3'd4 :
                      s_axis_mac_rx.tkeep[2] ? 3'd3 :
                      s_axis_mac_rx.tkeep[1] ? 3'd2 : 3'd1;
 
+// a shifted word is whole only if the word in holds its last two bytes
+wire in_whole = !s_axis_mac_rx.tlast || in_keep >= 3'd2;
+
 // AVTP common header, in AVTP word 0
 wire [7:0] avtp_subtype = quad[31:24];
 wire [2:0] avtp_version = quad[22:20];
@@ -144,12 +157,18 @@ wire [2:0] avtp_version = quad[22:20];
 // ACF common header and the first ABB fields, in ACF word 0; the message
 // length is in quadlets, header included
 wire [6:0]  acf_msg_type = quad[31:25];
-wire [10:0] acf_msg_bytes = {quad[24:16], 2'b00};
+wire [8:0]  acf_msg_len = quad[24:16];
+wire [10:0] acf_msg_bytes = {acf_msg_len, 2'b00};
 wire [1:0]  acf_pad = quad[15:14];
 wire [10:0] acf_payload_len = acf_msg_bytes - 11'd8 - 11'(acf_pad);
 
-// the message holds its header and pad, and fits in the NTSCF payload
-wire acf_len_ok = acf_msg_bytes >= 11'd8 + 11'(acf_pad) && acf_msg_bytes <= data_rem_reg;
+// NTSCF payload left once this message is done
+wire [10:0] acf_data_rem = data_rem_reg - acf_msg_bytes;
+
+// the message fits in the NTSCF payload, and an ABB message also holds its
+// header and pad
+wire acf_fits = acf_msg_bytes <= data_rem_reg;
+wire acf_abb_ok = acf_fits && acf_msg_bytes >= 11'd8 + 11'(acf_pad);
 
 // handle ethertype: the route table
 state_t eth_type_state;
@@ -190,6 +209,7 @@ logic [31:0] m_axis_eth_rx_tdata_int;
 logic [3:0]  m_axis_eth_rx_tkeep_int;
 logic        m_axis_eth_rx_tvalid_int;
 logic        m_axis_eth_rx_tlast_int;
+logic        m_axis_eth_rx_tuser_int;
 
 assign s_axis_mac_rx.tready = s_axis_mac_rx_tready_int;
 
@@ -200,7 +220,7 @@ assign m_axis_eth_rx.tvalid = m_axis_eth_rx_tvalid_int;
 assign m_axis_eth_rx.tlast  = m_axis_eth_rx_tlast_int;
 assign m_axis_eth_rx.tid    = FORMAT_ABB;
 assign m_axis_eth_rx.tdest  = route_reg;
-assign m_axis_eth_rx.tuser  = '0;
+assign m_axis_eth_rx.tuser  = m_axis_eth_rx_tuser_int;
 
 always_comb begin
     state_next = state_reg;
@@ -208,6 +228,8 @@ always_comb begin
     ptr_next = ptr_reg;
     route_next = route_reg;
     data_rem_next = data_rem_reg;
+    msg_rem_next = msg_rem_reg;
+    pad_next = pad_reg;
     frame_end_next = frame_end_reg;
 
     stream_id_next = stream_id_reg;
@@ -223,6 +245,7 @@ always_comb begin
     m_axis_eth_rx_tkeep_int = 4'b1111;
     m_axis_eth_rx_tvalid_int = 1'b0;
     m_axis_eth_rx_tlast_int = 1'b0;
+    m_axis_eth_rx_tuser_int = 1'b0;
 
     case (state_reg)
         STATE_ETH: begin
@@ -305,15 +328,24 @@ always_comb begin
                 mtv_next = quad[13];
                 byte_bus_id_next = quad[10:0];
                 payload_len_next = acf_payload_len;
-                data_rem_next = data_rem_reg - acf_msg_bytes;
+                pad_next = acf_pad;
+                msg_rem_next = acf_msg_len - 9'd1;
+                data_rem_next = acf_data_rem;
 
                 if (s_axis_mac_rx.tlast) begin
                     ptr_next = '0;
                     state_next = STATE_ETH;
-                end else if (acf_msg_type == ACF_MSG_TYPE_ABB && acf_len_ok && acf_payload_len == 0) begin
-                    state_next = STATE_ABB_1;
+                end else if (acf_msg_type == ACF_MSG_TYPE_ABB) begin
+                    state_next = acf_abb_ok ? STATE_ABB_1 : STATE_DROP;
+                end else if (acf_msg_len != 0 && acf_fits) begin
+                    // any other message is skipped by its length; one that is
+                    // only this quadlet is already done
+                    if (acf_msg_len != 9'd1) begin
+                        state_next = STATE_SKIP;
+                    end else begin
+                        state_next = acf_data_rem != 0 ? STATE_ACF : STATE_DROP;
+                    end
                 end else begin
-                    // unknown or malformed, or a payload, not handled yet
                     state_next = STATE_DROP;
                 end
             end
@@ -323,10 +355,12 @@ always_comb begin
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
                 abb_1_next = quad;
                 ptr_next = '0;
+                msg_rem_next = msg_rem_reg - 1;
                 frame_end_next = s_axis_mac_rx.tlast;
 
-                if (s_axis_mac_rx.tlast && in_keep < 3'd2) begin
-                    // the frame ended inside this quadlet
+                if (s_axis_mac_rx.tlast && (!in_whole || msg_rem_reg != 9'd1)) begin
+                    // the frame ended inside this quadlet or before the
+                    // payload, so nothing is sent
                     state_next = STATE_ETH;
                 end else begin
                     state_next = STATE_RECORD;
@@ -337,15 +371,65 @@ always_comb begin
             // the record goes out while the input waits
             s_axis_mac_rx_tready_int = 1'b0;
             m_axis_eth_rx_tvalid_int = 1'b1;
-            m_axis_eth_rx_tlast_int = ptr_reg == 3'd3;
+            m_axis_eth_rx_tlast_int = ptr_reg == 3'd3 && msg_rem_reg == 0;
 
             if (m_axis_eth_rx.tready) begin
                 ptr_next = ptr_reg + 1;
 
                 if (ptr_reg == 3'd3) begin
                     ptr_next = '0;
-                    // a later message is not handled yet
-                    state_next = frame_end_reg ? STATE_ETH : STATE_DROP;
+
+                    if (msg_rem_reg != 0) begin
+                        state_next = STATE_PAYLOAD;
+                    end else if (frame_end_reg) begin
+                        state_next = STATE_ETH;
+                    end else begin
+                        state_next = data_rem_reg != 0 ? STATE_ACF : STATE_DROP;
+                    end
+                end
+            end
+        end
+        STATE_PAYLOAD: begin
+            // one shifted word out per word in; the payload stays in wire
+            // order
+            s_axis_mac_rx_tready_int = m_axis_eth_rx.tready;
+            m_axis_eth_rx_tdata_int = shifted;
+            m_axis_eth_rx_tvalid_int = s_axis_mac_rx.tvalid;
+
+            if (msg_rem_reg == 9'd1) begin
+                // the last quadlet, less its pad
+                m_axis_eth_rx_tkeep_int = 4'b1111 >> pad_reg;
+                m_axis_eth_rx_tlast_int = 1'b1;
+            end
+
+            if (s_axis_mac_rx.tlast && (msg_rem_reg != 9'd1 || !in_whole)) begin
+                // the frame ended before the message did; send what arrived
+                m_axis_eth_rx_tkeep_int = in_whole ? 4'b1111 : 4'b0111;
+                m_axis_eth_rx_tlast_int = 1'b1;
+                m_axis_eth_rx_tuser_int = 1'b1;
+            end
+
+            if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
+                msg_rem_next = msg_rem_reg - 1;
+
+                if (s_axis_mac_rx.tlast) begin
+                    ptr_next = '0;
+                    state_next = STATE_ETH;
+                end else if (msg_rem_reg == 9'd1) begin
+                    state_next = data_rem_reg != 0 ? STATE_ACF : STATE_DROP;
+                end
+            end
+        end
+        STATE_SKIP: begin
+            // a message of another type, skipped by its length
+            if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
+                msg_rem_next = msg_rem_reg - 1;
+
+                if (s_axis_mac_rx.tlast) begin
+                    ptr_next = '0;
+                    state_next = STATE_ETH;
+                end else if (msg_rem_reg == 9'd1) begin
+                    state_next = data_rem_reg != 0 ? STATE_ACF : STATE_DROP;
                 end
             end
         end
@@ -367,6 +451,8 @@ always_ff @(posedge clk) begin
     ptr_reg <= ptr_next;
     route_reg <= route_next;
     data_rem_reg <= data_rem_next;
+    msg_rem_reg <= msg_rem_next;
+    pad_reg <= pad_next;
     frame_end_reg <= frame_end_next;
 
     stream_id_reg <= stream_id_next;
