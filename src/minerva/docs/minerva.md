@@ -6,6 +6,10 @@ payload and metadata of each ACF message to its consumer. Transmit mirrors it.
 It follows zircon (`src/zircon`), cut down to this function, and is intended to
 grow PTP and L2 switching routes.
 
+The first implementation covers NTSCF with ABB. TSCF, GBB and every other
+format are deferred, and until added count as an unknown `subtype` or
+`acf_msg_type` (open decision 3).
+
 ## Scope
 
 Minerva is pure packet parsing: it applies IEEE 802.3 and IEEE 1722 and nothing
@@ -18,7 +22,7 @@ above them.
 | Walk concatenated ACF messages | Responses |
 | Check lengths, delimit each payload | |
 | Report header fields as metadata | Anything that needs configuration |
-| Build frames on transmit | |
+| Build frames on transmit | Response addresses, from the request's `stream_id` MacAddress |
 
 ## Interfaces
 
@@ -48,12 +52,12 @@ above them.
 | Layer | Header | Selected by | Next |
 | :--- | :--- | :--- | :--- |
 | Ethernet | 14 bytes, 18 with one 802.1Q/802.1ad tag | | ethertype `0x22F0` AVTP; `0x88F7` PTP later |
-| AVTP common header | first quadlet of the PDU | `subtype` | `0x82` NTSCF, `0x05` TSCF |
+| AVTP common header | first quadlet of the PDU | `subtype` | `0x82` NTSCF; `0x05` TSCF deferred |
 | NTSCF | 3 quadlets | | ACF messages, `ntscf_data_length` bytes |
-| TSCF | 6 quadlets | | ACF messages, `stream_data_length` bytes |
-| ACF message | `acf_msg_length` quadlets, header included | `acf_msg_type` | `0x0E` ABB, `0x0D` GBB |
+| TSCF *(deferred)* | 6 quadlets | | ACF messages, `stream_data_length` bytes |
+| ACF message | `acf_msg_length` quadlets, header included | `acf_msg_type` | `0x0E` ABB; `0x0D` GBB deferred |
 | ABB | 2 quadlets | | `byte_msg_payload` |
-| GBB | 4 quadlets | | `byte_msg_payload` |
+| GBB *(deferred)* | 4 quadlets | | `byte_msg_payload` |
 
 An NTSCF or TSCF payload carries one or more ACF messages back to back. Each
 starts where the previous one ended (`acf_msg_length` x 4 bytes on), and the
@@ -72,27 +76,29 @@ Words after the L2 header, fields MSB first:
 | 4 | `evt` 4, `rsv` 2, `hs` 1, `cs` 1, `transaction_num` 8, `op` 1, `rsp` 1, `err` 1, `ms` 1, `read_size/segment_num` 12 |
 | 5... | `byte_msg_payload`, then `pad` zero bytes; the next message starts at word 3 + `acf_msg_length` |
 
-TSCF replaces words 0-2 with six words: `subtype` 8, `sv` 1, `version` 3,
+TSCF *(deferred)* replaces words 0-2 with six words: `subtype` 8, `sv` 1, `version` 3,
 `mr` 1, `rsv` 2, `tv` 1, `sequence_num` 8, `reserved` 7, `tu` 1; `stream_id`
 over two words; `avtp_timestamp` 32; `reserved` 32; `stream_data_length` 16,
 `reserved` 16.
 
-GBB has the same fields as ABB, with `message_timestamp` (64 bits) inserted as
+GBB *(deferred)* has the same fields as ABB, with `message_timestamp` (64 bits) inserted as
 two words between ABB's words 3 and 4.
 
 ABB payload bytes = `acf_msg_length` x 4 - 8 - `pad`; for GBB, 16 instead of 8.
 The 1500-byte Ethernet payload bounds all of it: an ABB payload is at most
 1500 - 12 - 8 = 1480 bytes.
 
-Layouts: `refs/Open1722/include/avtp`.
+Field layouts and meanings: `avtp.md`, drawn from `refs/Open1722` and
+`refs/libavtp`.
 
 ## Validation
 
 | Check | Source |
 | :--- | :--- |
-| `subtype` is NTSCF or TSCF | Open1722 `Ntscf_IsValid`, `Tscf_IsValid` |
+| `subtype` is NTSCF (TSCF deferred) | Open1722 `Ntscf_IsValid` |
+| `version` is 0; version 1 is discarded | project: only version 0 is supported |
 | Data length fits in the bytes received after the header | Open1722 checks against the whole buffer, loose by the header (12 or 24 bytes); minerva counts from the end of the header |
-| `acf_msg_type` is ABB or GBB | Open1722 `Abb_IsValid`, `Gbb_IsValid` |
+| `acf_msg_type` is ABB (GBB deferred) | Open1722 `Abb_IsValid` |
 | `acf_msg_length` x 4 >= header + `pad` | same |
 | The message ends within the data length | the walk in `acf-can-common.c` |
 | A frame that ends before its lengths say is truncated | streaming: known only at `tlast` |
@@ -110,7 +116,7 @@ message is good.
 
 `minerva_tx_deparse` builds the L2 header: each input packet starts with an
 8-byte prefix, destination address then ethertype, and `LOCAL_MAC` is inserted
-as the source. The AVTP, NTSCF/TSCF and ACF headers are still to be designed.
+as the source. The AVTP, NTSCF and ABB headers are still to be designed.
 
 ## Modules
 
@@ -122,8 +128,8 @@ as the source. The AVTP, NTSCF/TSCF and ACF headers are still to be designed.
 ## Verification cases
 
 - Untagged, one tag, two tags (dropped)
-- NTSCF, TSCF, unknown `subtype`
-- One ACF message, several concatenated, ABB and GBB mixed, unknown `acf_msg_type`
+- NTSCF, unknown `subtype` (TSCF while deferred), `version` 1
+- One ABB message, several concatenated, unknown `acf_msg_type` (GBB while deferred)
 - Payload lengths 0 to 3 (every `pad`), and the 1480-byte maximum
 - Minimum frame with Ethernet padding after the data length
 - Frame truncated inside a header, and inside a payload
@@ -133,12 +139,13 @@ as the source. The AVTP, NTSCF/TSCF and ACF headers are still to be designed.
 
 ## Open decisions
 
-1. The metadata record: fields, widths, how many words it takes, and that it is
-   issued once the message has been checked.
+1. The metadata record. It carries every ABB header field, uninterpreted,
+   and the `stream_id` the response goes back to. Open: widths, how many words
+   it takes, and that it is issued once the message has been checked.
 2. One receive FSM across all layers (zircon) or one module per layer.
 3. On an unknown `subtype` or `acf_msg_type`: drop the frame, or skip the
    message by its `acf_msg_length`.
-4. Whether `sv`, `version` and reserved bits are checked.
+4. Whether `sv` and reserved bits are checked.
 5. Sequence numbers: minerva reports `sequence_num`; tracking misses per
    stream (`ntscf_sn_miss`) keeps state per `stream_id`, in minerva or in the
    consumer.
