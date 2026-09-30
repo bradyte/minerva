@@ -20,7 +20,6 @@ SYN_FILES = $(RTL_DIR)/fpga.sv
 SYN_FILES += $(RTL_DIR)/fpga_core.sv
 SYN_FILES += $(RTL_DIR)/zedboard_regs_pkg.sv
 SYN_FILES += $(RTL_DIR)/zedboard_regs.sv
-SYN_FILES += $(RTL_DIR)/ctrl_status.sv
 SYN_FILES += $(RTL_DIR)/avtp_echo.sv
 SYN_FILES += $(TAXI_SRC_DIR)/minerva/rtl/minerva_rx_parse.sv
 SYN_FILES += $(TAXI_SRC_DIR)/minerva/rtl/minerva_tx_deparse.sv
@@ -42,9 +41,6 @@ XDC_FILES += $(TAXI_SRC_DIR)/eth/syn/vivado/taxi_eth_mac_fifo.tcl
 XDC_FILES += $(TAXI_SRC_DIR)/axis/syn/vivado/taxi_axis_async_fifo.tcl
 XDC_FILES += $(TAXI_SRC_DIR)/sync/syn/vivado/taxi_sync_reset.tcl
 XDC_FILES += $(TAXI_SRC_DIR)/sync/syn/vivado/taxi_sync_signal.tcl
-
-# IP
-IP_TCL_FILES += ../ip/vio_0.tcl
 
 # Configuration
 #CONFIG_TCL_FILES = ./config.tcl

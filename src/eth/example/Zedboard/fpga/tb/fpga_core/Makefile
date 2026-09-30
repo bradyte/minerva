@@ -30,7 +30,6 @@ VERILOG_SOURCES += $(RTL_DIR)/zedboard_regs.vlt
 VERILOG_SOURCES += $(RTL_DIR)/zedboard_regs_pkg.sv
 VERILOG_SOURCES += $(RTL_DIR)/$(DUT).sv
 VERILOG_SOURCES += $(RTL_DIR)/zedboard_regs.sv
-VERILOG_SOURCES += $(RTL_DIR)/ctrl_status.sv
 VERILOG_SOURCES += $(RTL_DIR)/avtp_echo.sv
 VERILOG_SOURCES += $(TAXI_SRC_DIR)/minerva/rtl/minerva_rx_parse.sv
 VERILOG_SOURCES += $(TAXI_SRC_DIR)/minerva/rtl/minerva_tx_deparse.sv

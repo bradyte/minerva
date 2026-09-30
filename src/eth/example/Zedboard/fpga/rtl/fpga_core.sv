@@ -205,7 +205,6 @@ regs_inst (
 // PHY management
 wire [4:0]  phy_addr;
 wire        phy_present;
-wire [31:0] phy_id;
 wire        phy_id_done;
 wire        phy_irq;
 
@@ -226,7 +225,7 @@ phy_management_inst (
 
     .phy_addr(phy_addr),
     .phy_present(phy_present),
-    .phy_id(phy_id),
+    .phy_id(),
     .phy_id_done(phy_id_done),
     .phy_irq(phy_irq),
 
@@ -278,10 +277,6 @@ taxi_axis_if #(.DATA_W(32), .USER_EN(1), .USER_W(1)) axis_mac_rx();
 taxi_axis_if #(.DATA_W(32), .USER_EN(1), .USER_W(1)) axis_mac_tx();
 taxi_axis_if #(.DATA_W(96), .KEEP_W(1), .ID_W(8)) axis_tx_cpl();
 
-wire [1:0] link_speed;
-wire       tx_fifo_good_frame;
-wire       rx_error_bad_frame;
-wire       rx_error_bad_fcs;
 wire       rx_fifo_good_frame;
 
 taxi_eth_mac_1g_rgmii_fifo #(
@@ -343,13 +338,13 @@ eth_mac_inst (
     .tx_error_underflow(),
     .tx_fifo_overflow(),
     .tx_fifo_bad_frame(),
-    .tx_fifo_good_frame(tx_fifo_good_frame),
-    .rx_error_bad_frame(rx_error_bad_frame),
-    .rx_error_bad_fcs(rx_error_bad_fcs),
+    .tx_fifo_good_frame(),
+    .rx_error_bad_frame(),
+    .rx_error_bad_fcs(),
     .rx_fifo_overflow(),
     .rx_fifo_bad_frame(),
     .rx_fifo_good_frame(rx_fifo_good_frame),
-    .link_speed(link_speed),
+    .link_speed(),
 
     /*
      * Configuration
@@ -405,40 +400,20 @@ minerva_tx_deparse_inst (
     .m_axis_mac_tx(axis_mac_tx)
 );
 
-// Control and status
-ctrl_status #(
-    .SIM(SIM)
-)
-ctrl_status_inst (
-    .clk(clk),
-    .rst(rst),
+// LEDs: PHY found, startup done, a frame received, PHY address
+logic rx_seen_reg = 1'b0;
 
-    .led(led),
+always_ff @(posedge clk) begin
+    if (rx_fifo_good_frame) begin
+        rx_seen_reg <= 1'b1;
+    end
 
-    .phy_present(phy_present),
-    .phy_id_done(phy_id_done),
-    .phy_addr(phy_addr),
-    .phy_id(phy_id),
-    .phy_irq(phy_irq),
-    .link_speed(link_speed),
+    if (rst) begin
+        rx_seen_reg <= 1'b0;
+    end
+end
 
-    .rx_good(rx_fifo_good_frame),
-    .rx_bad_fcs(rx_error_bad_fcs),
-    .rx_bad_frame(rx_error_bad_frame),
-    .tx_good(tx_fifo_good_frame),
-
-    // the registers own these controls now; the VIO only reads
-    .idelay_value(),
-    .idelay_load(),
-
-    .req_phy_addr(),
-    .req_reg_addr(),
-    .req_wr_data(),
-    .req_wr(),
-    .req_go(),
-    .req_rd_data(mdio_rd_data),
-    .req_busy(mdio_busy)
-);
+assign led = {phy_present, phy_id_done, rx_seen_reg, phy_addr};
 
 endmodule
 

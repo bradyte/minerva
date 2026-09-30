@@ -150,6 +150,7 @@ REG_IDELAY_TAP = 0x100D
 
 PHY_STATUS_PRESENT = 0x01
 PHY_STATUS_INIT_DONE = 0x02
+PHY_STATUS_IRQ = 0x04
 MDIO_CTRL_GO = 0x01
 MDIO_CTRL_WRITE = 0x02
 MDIO_CTRL_BUSY = 0x80
@@ -291,22 +292,15 @@ async def run_test(dut):
 
     rx_count, tx_count = await avtp_echo_test(tb, tb.baset_phy.rx, tb.baset_phy.tx)
 
-    # the counters read over the VIO on hardware must agree with the traffic
-    status = dut.ctrl_status_inst
-    assert status.rx_good_cnt_reg.value.integer == rx_count
-    assert status.tx_good_cnt_reg.value.integer == tx_count
-    assert status.rx_bad_fcs_cnt_reg.value.integer == 0
-    assert status.rx_bad_frame_cnt_reg.value.integer == 0
-
-    # INT_N reaches the VIO through phy_management, active high
-    assert status.phy_irq.value.integer == 0
+    # INT_N reaches PHY_STATUS through phy_management, active high
+    assert not (await tb.xfcp_read(XFCP_REGS, REG_PHY_STATUS, 1))[0] & PHY_STATUS_IRQ
     dut.phy_int_n.value = 0
     for k in range(4):
         await RisingEdge(dut.clk)
-    assert status.phy_irq.value.integer == 1
+    assert (await tb.xfcp_read(XFCP_REGS, REG_PHY_STATUS, 1))[0] & PHY_STATUS_IRQ
     dut.phy_int_n.value = 1
 
-    # the same traffic counted by the MAC statistics, read over XFCP
+    # the traffic counted by the MAC statistics, read over XFCP
     for stat_id, name, count in [(STAT_TX_PKTS, 'TX_PKTS', tx_count), (STAT_RX_PKTS, 'RX_PKTS', rx_count)]:
         val = int.from_bytes(await tb.xfcp_read(XFCP_STAT_COUNT, stat_id*8, 8), 'little')
 
@@ -357,7 +351,6 @@ def test_fpga_core(request):
         os.path.join(rtl_dir, "zedboard_regs_pkg.sv"),
         os.path.join(rtl_dir, f"{dut}.sv"),
         os.path.join(rtl_dir, "zedboard_regs.sv"),
-        os.path.join(rtl_dir, "ctrl_status.sv"),
         os.path.join(rtl_dir, "avtp_echo.sv"),
         os.path.join(taxi_src_dir, "minerva", "rtl", "minerva_rx_parse.sv"),
         os.path.join(taxi_src_dir, "minerva", "rtl", "minerva_tx_deparse.sv"),
