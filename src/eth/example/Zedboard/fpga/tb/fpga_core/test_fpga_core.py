@@ -45,6 +45,16 @@ except ImportError:
     finally:
         del sys.path[0]
 
+try:
+    import avtp
+except ImportError:
+    # attempt import from current directory
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+    try:
+        import avtp
+    finally:
+        del sys.path[0]
+
 
 class TB:
     def __init__(self, dut, speed=1000e6):
@@ -171,41 +181,80 @@ def payload_data(n, seed):
     return bytes((seed + k) & 0xff for k in range(n))
 
 
-async def avtp_echo_test(tb, source, sink):
-    tb.log.info("AVTP echo through minerva")
+async def record_echo_test(tb, source, sink):
+    tb.log.info("Record echo through minerva")
 
-    # (frame sent, echo expected or None if it must be dropped)
+    # the host puts its own address in stream_id, so the echoes come back to it
+    stream_id = int.from_bytes(HOST_MAC, 'big') << 16 | 0x0001
+
+    # (frame sent, echoes expected)
     test_frames = []
 
-    # every tail alignment, then full size
-    for n in (46, 47, 48, 49, 1500):
-        p = payload_data(n, n)
-        test_frames.append((l2_frame(BCAST, HOST_MAC, ETHERTYPE_AVTP, p),
-                            l2_frame(BCAST, LOCAL_MAC, ETHERTYPE_AVTP, p)))
+    def request(items, vlan=None, sv=1, cut=None):
+        """A frame from the host holding these messages: an ABB message given
+        by its payload length, or any other ACF message as bytes.  Each ABB
+        message comes back alone in its own PDU, rebuilt from the record."""
+        k = len(test_frames)
+        msgs = []
+        echoes = []
+        for j, item in enumerate(items):
+            if isinstance(item, bytes):
+                msgs.append(item)
+                continue
+            byte_bus_id = (0x5ff + 0x123 * (k + j)) & 0x7ff
+            mtv = j & 1
+            word1 = avtp.abb_word1(evt=j & 0xf, transaction_num=(k + j) & 0xff, op=k & 1, read_size=0x100 + j)
+            payload = payload_data(item, k + j)
+            msg = avtp.abb_message(byte_bus_id, mtv, word1, payload)
+            msgs.append(msg)
+            pdu = avtp.ntscf_pdu(stream_id, k, [msg], sv=sv)
+            echoes.append(l2_frame(HOST_MAC, LOCAL_MAC, ETHERTYPE_AVTP, pdu).ljust(60, b'\x00'))
+        pdu = avtp.ntscf_pdu(stream_id, k, msgs, sv=sv)
+        if cut is not None:
+            # the frame ends inside the last payload, so it has no echo
+            pdu = pdu[:cut]
+            echoes.pop()
+        test_frames.append((l2_frame(BCAST, HOST_MAC, ETHERTYPE_AVTP, pdu, vlan).ljust(60, b'\x00'), echoes))
 
-    # full-size tagged, 1522 bytes on the wire, comes back untagged
-    p = payload_data(1500, 7)
-    test_frames.append((l2_frame(BCAST, HOST_MAC, ETHERTYPE_AVTP, p, vlan=100),
-                        l2_frame(BCAST, LOCAL_MAC, ETHERTYPE_AVTP, p)))
+    def drop(ethertype):
+        test_frames.append((l2_frame(BCAST, HOST_MAC, ethertype, payload_data(46, len(test_frames))), []))
 
-    # anything that is not AVTP is dropped
-    test_frames.insert(1, (l2_frame(BCAST, HOST_MAC, 0x88B5, payload_data(46, 1)), None))
-    test_frames.insert(5, (l2_frame(BCAST, HOST_MAC, 0x0800, payload_data(1500, 2)), None))
+    # a record alone, then every pad
+    request([0])
+    request([1])
+    drop(0x88B5)
+    request([2], sv=0)
+    request([3])
+    request([4])
+
+    # the largest payload, then tagged, 1522 bytes on the wire, which comes
+    # back untagged
+    request([1480])
+    request([1480], vlan=100)
+    drop(0x0800)
+
+    # three messages come back as three frames, and another ACF type is
+    # skipped
+    request([5, 0, 12])
+    request([2, avtp.acf_message(avtp.ACF_MSG_TYPE_CAN, payload_data(10, 0)), 7])
+
+    # a frame ending inside a payload: minerva marks the packet with tuser and
+    # the message FIFO drops it; the message before it still comes back
+    request([8, 100], cut=12 + 16 + 8 + 60)
+    request([6])
 
     for frame, _ in test_frames:
         await source.send(GmiiFrame.from_payload(frame))
 
-    for _, echo in test_frames:
-        if echo is None:
-            continue
+    for _, echoes in test_frames:
+        for echo in echoes:
+            rx_frame = await with_timeout(sink.recv(), 100, 'us')
 
-        rx_frame = await with_timeout(sink.recv(), 100, 'us')
+            tb.log.info("RX frame: %s", rx_frame)
 
-        tb.log.info("RX frame: %s", rx_frame)
-
-        assert rx_frame.get_payload() == echo
-        assert rx_frame.check_fcs()
-        assert rx_frame.error is None
+            assert rx_frame.get_payload() == echo
+            assert rx_frame.check_fcs()
+            assert rx_frame.error is None
 
     # nothing else may come back
     for k in range(2000):
@@ -213,7 +262,7 @@ async def avtp_echo_test(tb, source, sink):
 
     assert sink.empty()
 
-    return len(test_frames), sum(1 for _, echo in test_frames if echo is not None)
+    return len(test_frames), sum(len(echoes) for _, echoes in test_frames)
 
 
 async def mdio_request(tb, reg, data=None):
@@ -290,7 +339,7 @@ async def run_test(dut):
 
     await tb.init()
 
-    rx_count, tx_count = await avtp_echo_test(tb, tb.baset_phy.rx, tb.baset_phy.tx)
+    rx_count, tx_count = await record_echo_test(tb, tb.baset_phy.rx, tb.baset_phy.tx)
 
     # INT_N reaches PHY_STATUS through phy_management, active high
     assert not (await tb.xfcp_read(XFCP_REGS, REG_PHY_STATUS, 1))[0] & PHY_STATUS_IRQ
@@ -351,7 +400,7 @@ def test_fpga_core(request):
         os.path.join(rtl_dir, "zedboard_regs_pkg.sv"),
         os.path.join(rtl_dir, f"{dut}.sv"),
         os.path.join(rtl_dir, "zedboard_regs.sv"),
-        os.path.join(rtl_dir, "avtp_echo.sv"),
+        os.path.join(rtl_dir, "record_echo.sv"),
         os.path.join(taxi_src_dir, "minerva", "rtl", "minerva_rx_parse.sv"),
         os.path.join(taxi_src_dir, "minerva", "rtl", "minerva_tx_deparse.sv"),
         os.path.join(taxi_src_dir, "eth", "rtl", "taxi_eth_mac_1g_rgmii_fifo.f"),
@@ -360,6 +409,7 @@ def test_fpga_core(request):
         os.path.join(taxi_src_dir, "xfcp", "rtl", "taxi_xfcp_mod_stats.f"),
         os.path.join(taxi_src_dir, "xfcp", "rtl", "taxi_xfcp_mod_apb.f"),
         os.path.join(taxi_src_dir, "phy", "adin1300", "rtl", "phy_management.f"),
+        os.path.join(taxi_src_dir, "axis", "rtl", "taxi_axis_fifo.sv"),
         os.path.join(taxi_src_dir, "axis", "rtl", "taxi_axis_null_snk.sv"),
         os.path.join(taxi_src_dir, "sync", "rtl", "taxi_sync_signal.sv"),
     ]

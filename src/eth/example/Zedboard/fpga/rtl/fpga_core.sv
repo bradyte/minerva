@@ -15,8 +15,9 @@ Authors:
 /*
  * FPGA core logic
  *
- * Minerva L2 stack on the ADIN1300 MAC.  Received AVTP payloads are echoed back
- * to broadcast from LOCAL_MAC; every other frame is dropped in the parser.
+ * Minerva on the ADIN1300 MAC.  Each ABB message received is rebuilt from
+ * minerva's record and echoed from LOCAL_MAC to the MacAddress in its
+ * stream_id; every other frame is dropped in the parser.
  */
 module fpga_core #
 (
@@ -365,10 +366,10 @@ tx_cpl_null_inst (
     .s_axis(axis_tx_cpl)
 );
 
-// Minerva L2 stack, with the AVTP echo standing in for the consumer
+// Minerva, with the record echo standing in for the consumer
 localparam logic [47:0] LOCAL_MAC = 48'h02_00_00_00_00_01;
 
-taxi_axis_if #(.DATA_W(32), .DEST_EN(1), .DEST_W(1)) axis_eth_rx();
+taxi_axis_if #(.DATA_W(32), .ID_EN(1), .ID_W(4), .DEST_EN(1), .DEST_W(1), .USER_EN(1), .USER_W(1)) axis_eth_rx(), axis_eth_rx_fifo();
 taxi_axis_if #(.DATA_W(32)) axis_eth_tx();
 
 minerva_rx_parse
@@ -380,12 +381,50 @@ minerva_rx_parse_inst (
     .m_axis_eth_rx(axis_eth_rx)
 );
 
-avtp_echo
-avtp_echo_inst (
+// each message is held until it is complete, and a truncated one, marked by
+// tuser, is dropped
+taxi_axis_fifo #(
+    .DEPTH(2048),
+    .FRAME_FIFO(1),
+    .DROP_BAD_FRAME(1),
+    .DROP_WHEN_FULL(0)
+)
+rx_msg_fifo_inst (
     .clk(clk),
     .rst(rst),
 
-    .s_axis_eth_rx(axis_eth_rx),
+    /*
+     * AXI4-Stream input (sink)
+     */
+    .s_axis(axis_eth_rx),
+
+    /*
+     * AXI4-Stream output (source)
+     */
+    .m_axis(axis_eth_rx_fifo),
+
+    /*
+     * Pause
+     */
+    .pause_req(1'b0),
+    .pause_ack(),
+
+    /*
+     * Status
+     */
+    .status_depth(),
+    .status_depth_commit(),
+    .status_overflow(),
+    .status_bad_frame(),
+    .status_good_frame()
+);
+
+record_echo
+record_echo_inst (
+    .clk(clk),
+    .rst(rst),
+
+    .s_axis_eth_rx(axis_eth_rx_fifo),
     .m_axis_eth_tx(axis_eth_tx)
 );
 
