@@ -214,14 +214,17 @@ as the source. The AVTP, NTSCF and ABB headers are still to be designed.
 
 | Module | Function | Status |
 | :--- | :--- | :--- |
-| `minerva_rx_parse` | Parses Ethernet to ABB; one record and payload per message | in development; the L2-only version is validated on hardware |
+| `minerva_rx_parse` | Parses Ethernet to ABB; one record and payload per message | validated on hardware |
 | `minerva_tx_deparse` | Builds the L2 header | validated on hardware |
 
 ## Versions
 
 Each milestone is developed on its own branch, merged once it passes on
-hardware, and tagged in git. The first is the record echo, on
-`minerva-records`.
+hardware, and tagged in git.
+
+| Tag | Milestone |
+| :--- | :--- |
+| `minerva-0.1.0` | NTSCF with ABB received as record and payload, validated on the Zedboard with the record echo |
 
 ## Verification cases
 
