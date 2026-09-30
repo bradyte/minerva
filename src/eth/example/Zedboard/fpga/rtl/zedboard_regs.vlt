@@ -8,7 +8,10 @@
 // Lint waivers for the generated register block, simulation only.
 // regblock writes separate members of its field_combo struct from separate
 // always_comb blocks; that is legal, but Verilator warns per variable.
+// The package has no `timescale; cocotb's Makefile supplies a default, but
+// cocotb-test's run() does not.
 
 `verilator_config
 
 lint_off -rule MULTIDRIVEN -file "*/zedboard_regs.sv"
+lint_off -rule TIMESCALEMOD -file "*/zedboard_regs_pkg.sv"
