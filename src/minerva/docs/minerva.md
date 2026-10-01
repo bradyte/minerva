@@ -250,8 +250,8 @@ payload that ends short or long, or an abort at its end, ends the frame with
 
 ## Versions
 
-Each milestone is developed on its own branch, merged once it passes on
-hardware, and tagged in git.
+Development is on `main`, where every commit builds and passes the benches.
+Each milestone is tagged in git once it passes on hardware.
 
 | Tag | Milestone |
 | :--- | :--- |
