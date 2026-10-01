@@ -25,7 +25,7 @@ src/eth/example/Zedboard/fpga/
   rtl/fpga.sv            clocks, reset, receive IDELAY, MDIO tristate
   rtl/fpga_core.sv       MAC, minerva, PHY management, control/status
   rtl/ctrl_status.sv     VIO: MDIO requests, IDELAY tap, counters, LEDs
-  rtl/avtp_echo.sv       test fixture standing in for the consumer
+  rtl/record_echo.sv     test fixture: echoes each ABB message from its record
   tb/fpga_core/          whole-core bench from the RGMII pins
   utils/                 echo_test.py (host), vio_status.tcl and mdio_read.tcl (JTAG)
 src/minerva/             L2 stack: minerva_rx_parse, minerva_tx_deparse
@@ -40,7 +40,7 @@ ADIN1300 ◄─RGMII─► IDELAYE2 (RX, tap 12) ─► taxi_eth_mac_1g_rgmii_fi
                                               ▼                  │
                                       minerva_rx_parse   minerva_tx_deparse
                                               │ m_axis_eth_rx    ▲ s_axis_eth_tx
-                                              └──► avtp_echo ────┘
+                                              └──► record_echo ──┘
                                               (I2C consumer later)
 
 ADIN1300 ◄─MDIO/MDC, RESET_N── phy_management ◄── ctrl_status ◄── VIO (JTAG)
