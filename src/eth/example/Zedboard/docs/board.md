@@ -81,7 +81,7 @@ specifies 1.5–2.0 ns. Here it comes from the FPGA's BUFG insertion delay on th
 recovered receive clock, which the bank split forces. With the PHY's 2 ns on top
 the total is roughly a whole 4 ns bit period and nothing decodes. Measured: with
 `GE_RGMII_RX_ID_EN` set, zero frames at every `GE_RGMII_RX_SEL` value; cleared,
-frames arrive with zero FCS errors. `phy_init` writes 0x0E03 after the scan,
+frames arrive with zero FCS errors. `adin1300_init` writes 0x0E03 after the scan,
 as a Clause 45 address and write to device 0x1E (confirmed on hardware
 2026-09-28).
 
@@ -109,10 +109,10 @@ so the address is set by resistors on the eval card; address 0 means none fitted
 
 Extended management interface and subsystem registers live at MMD address 0x1E.
 Two ways in: Clause 45 addressing 0x1E directly — the datasheet's primary
-route, used by `phy_init` — or, for hosts without Clause 45, indirectly through
+route, used by `adin1300_init` — or, for hosts without Clause 45, indirectly through
 `EXT_REG_PTR` (0x10) and `EXT_REG_DATA` (0x11) using Clause 22.
-`taxi_mdio_master` drives ST/OP raw, so either works. The VIO request port
-(`mdio_cmd`) issues Clause 22 frames only.
+`taxi_mdio_master` drives ST/OP raw, so either works. The MDIO window in the
+registers (`adin1300_mdio_cmd`) issues Clause 22 frames only.
 
 ## UART
 
