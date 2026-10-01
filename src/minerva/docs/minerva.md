@@ -30,7 +30,7 @@ above them.
 | :--- | :--- |
 | From the MAC | 32-bit `taxi_axis_if`. The MAC RX FIFO must drop bad frames (`DROP_BAD_FRAME`); minerva does not examine `tuser`. |
 | To the consumer | 32-bit `taxi_axis_if`, one packet per ACF message; see Receive output. |
-| From the consumer | Open. |
+| From the consumer | 32-bit `taxi_axis_if`, one packet per message: the 6-word transmit record, then the payload; see Transmit. |
 | To the MAC | 32-bit `taxi_axis_if`; the MAC pads short frames. |
 
 ## Receive output
@@ -206,16 +206,47 @@ confirms that the frame was long enough.
 
 ## Transmit
 
-`minerva_tx_deparse` builds the L2 header: each input packet starts with an
-8-byte prefix, destination address then ethertype, and `LOCAL_MAC` is inserted
-as the source. The AVTP, NTSCF and ABB headers are still to be designed.
+`minerva_tx_deparse` mirrors the parser: one packet in per message, one frame
+out, the message as a single ABB message in an NTSCF PDU. Each record field is
+a literal wire field, as zircon's TX metadata is.
+
+| Signal | Meaning |
+| :--- | :--- |
+| `tdata` | record words 0-5, then the payload from lane 0 |
+| `tid` | format code: 0 = NTSCF with ABB |
+| `tdest` | route: 0 = AVTP |
+| `tuser` | at `tlast`: 1 = abort |
+| `tkeep` | all ones, except the last payload word |
+
+| Word | Bits | Field |
+| :---: | :--- | :--- |
+| 0-3 | | as the receive record; `stream_id` is the sender's own stream |
+| 4 | 31:0 | destination MAC `[47:16]` |
+| 5 | 31:16 | destination MAC `[15:0]` |
+| | 15:0 | reserved, 0 |
+
+`stream_id[63:16]` is the MAC of the stream's talker and `[15:0]` its
+UniqueID, 0 with one stream. A consumer replying to a request stores the
+request's `stream_id[63:16]` as the destination and sends its own stream,
+`{LOCAL_MAC, 0}`; it owns `sequence_num`.
+
+Minerva adds the rest: `cfg_local_mac` as the Ethernet source, sampled as each
+record begins; ethertype 0x22F0; `subtype`, `version` 0 and the reserved bits;
+`pad`, `acf_msg_length` and `ntscf_data_length` from `payload_len`; and the pad
+as zeros.
+
+Checks, settled at record word 5 before anything is sent, drop the packet: an
+unknown `tid` or `tdest`, a record shorter than 6 words, a payload missing or
+not announced, `payload_len` over 1480, or an abort on a record alone. A
+payload that ends short or long, or an abort at its end, ends the frame with
+`tuser` set, so the MAC TX FIFO drops it (`TX_DROP_BAD_FRAME`).
 
 ## Modules
 
 | Module | Function | Status |
 | :--- | :--- | :--- |
 | `minerva_rx_parse` | Parses Ethernet to ABB; one record and payload per message | validated on hardware |
-| `minerva_tx_deparse` | Builds the L2 header | validated on hardware |
+| `minerva_tx_deparse` | Builds a frame from a transmit record and payload | validated on hardware |
 
 ## Versions
 
@@ -225,10 +256,11 @@ hardware, and tagged in git.
 | Tag | Milestone |
 | :--- | :--- |
 | `minerva-0.1.0` | NTSCF with ABB received as record and payload, validated on the Zedboard with the record echo |
+| `minerva-0.2.0` | NTSCF with ABB sent from a transmit record, registered handshakes both ways, validated on the Zedboard with the record echo |
 
 ## Verification cases
 
-- Untagged, one tag, two tags (dropped)
+- Untagged, one tag, two tags (dropped), a tag with `VLAN_EN` off (dropped)
 - NTSCF, unknown `subtype` (TSCF while deferred), `version` 1, `sv` 0 passed on
 - One ABB message, several concatenated, an unknown `acf_msg_type` (GBB while
   deferred) skipped between ABB messages that are delivered
@@ -242,7 +274,19 @@ hardware, and tagged in git.
   message overrunning the data length
 - Back-to-back frames, and backpressure from the consumer
 
+Transmit:
+
+- Every record field placed in the frame, at every `pad` and the 1480-byte
+  maximum; a record alone gives a 34-byte frame
+- `cfg_local_mac` changed between frames
+- Dropped: unknown `tid` or `tdest`, short records, a payload missing, not
+  announced or over 1480 bytes, an aborted record alone
+- Marked bad (`tuser` = 1): a payload short or long by a byte or by words, an
+  abort at the end of a payload
+- Round trip: a transmit record through `minerva_tx_deparse` and
+  `minerva_rx_parse` comes back as the same receive record and payload
+
 ## Open decisions
 
-1. The transmit input from the consumer.
+1. Several messages per PDU on transmit; one per PDU for now.
 2. PTP and L2 switching routes, later.
