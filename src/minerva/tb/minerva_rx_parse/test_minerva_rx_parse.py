@@ -18,6 +18,7 @@ from scapy.layers.l2 import Ether, Dot1Q, Dot1AD
 from scapy.packet import Raw
 
 import cocotb_test.simulator
+import pytest
 
 import cocotb
 from cocotb.clock import Clock
@@ -120,6 +121,11 @@ def abb(k, stream_id, sequence_num, payload=b'', sv=1):
     return msg, pkt
 
 
+def tagged(dut, vlan, pkts):
+    """The packets a frame gives: none if it is tagged and VLAN_EN is off."""
+    return pkts if vlan is None or int(dut.VLAN_EN.value) else []
+
+
 async def run_frames(tb, test_frames):
     """Send each frame and check that exactly its packets come out, in order.
 
@@ -184,7 +190,7 @@ async def run_test_payload(dut, idle_inserter=None, backpressure_inserter=None):
             frame = l2_frame(ETHERTYPE_AVTP, avtp.ntscf_pdu(stream_id, sequence_num, [msg], sv=sv), vlan)
             if pad:
                 frame = eth_pad(frame)
-            test_frames.append((frame, [(pkt, False)]))
+            test_frames.append((frame, tagged(dut, vlan, [(pkt, False)])))
 
     await run_frames(tb, test_frames)
 
@@ -237,7 +243,7 @@ async def run_test_concat(dut, idle_inserter=None, backpressure_inserter=None):
             frame = l2_frame(ETHERTYPE_AVTP, avtp.ntscf_pdu(stream_id, sequence_num, msgs), vlan)
             if pad:
                 frame = eth_pad(frame)
-            test_frames.append((frame, pkts))
+            test_frames.append((frame, tagged(dut, vlan, pkts)))
 
     await run_frames(tb, test_frames)
 
@@ -274,7 +280,7 @@ async def run_test_truncate(dut, idle_inserter=None, backpressure_inserter=None)
                 pkts = [(pkt, True)]
             else:
                 pkts = [(pkt, False)]
-            test_frames.append((cut(pdu, n, vlan), pkts))
+            test_frames.append((cut(pdu, n, vlan), tagged(dut, vlan, pkts)))
 
     # two messages, the second's payload from PDU byte 36: cut inside its ACF
     # quadlet, inside its second quadlet, before and inside its payload
@@ -418,7 +424,8 @@ def process_f_files(files):
     return list(lst.values())
 
 
-def test_minerva_rx_parse(request):
+@pytest.mark.parametrize("vlan_en", [0, 1])
+def test_minerva_rx_parse(request, vlan_en):
     dut = "minerva_rx_parse"
     module = os.path.splitext(os.path.basename(__file__))[0]
     toplevel = module
@@ -433,7 +440,7 @@ def test_minerva_rx_parse(request):
 
     parameters = {}
 
-    parameters['VLAN_EN'] = 1
+    parameters['VLAN_EN'] = vlan_en
     parameters['ID_W'] = 4
     parameters['DEST_W'] = 1
 

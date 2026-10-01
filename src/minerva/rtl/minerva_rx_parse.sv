@@ -107,7 +107,7 @@ typedef enum logic [3:0] {
 state_t state_reg = STATE_ETH, state_next;
 
 // words of the L2 header consumed, then the record word being sent
-logic [2:0] ptr_reg = '0, ptr_next;
+logic [1:0] ptr_reg = '0, ptr_next;
 logic [DEST_W-1:0] route_reg = '0, route_next;
 
 // bytes of ACF messages still to come in the NTSCF payload
@@ -196,7 +196,7 @@ end
 logic [31:0] record_word;
 
 always_comb begin
-    case (ptr_reg[1:0])
+    case (ptr_reg)
         2'd0: record_word = stream_id_reg[63:32];
         2'd1: record_word = stream_id_reg[31:0];
         2'd2: record_word = {seq_num_reg, mtv_reg, byte_bus_id_reg, sv_reg, payload_len_reg};
@@ -256,7 +256,7 @@ always_comb begin
                 if (s_axis_mac_rx.tlast) begin
                     ptr_next = '0;
                     state_next = STATE_ETH;
-                end else if (ptr_reg == 3'd3) begin
+                end else if (ptr_reg == 2'd3) begin
                     route_next = eth_type_route;
                     state_next = eth_type_state;
                 end
@@ -371,12 +371,12 @@ always_comb begin
             // the record goes out while the input waits
             s_axis_mac_rx_tready_int = 1'b0;
             m_axis_eth_rx_tvalid_int = 1'b1;
-            m_axis_eth_rx_tlast_int = ptr_reg == 3'd3 && msg_rem_reg == 0;
+            m_axis_eth_rx_tlast_int = ptr_reg == 2'd3 && msg_rem_reg == 0;
 
             if (m_axis_eth_rx.tready) begin
                 ptr_next = ptr_reg + 1;
 
-                if (ptr_reg == 3'd3) begin
+                if (ptr_reg == 2'd3) begin
                     ptr_next = '0;
 
                     if (msg_rem_reg != 0) begin
