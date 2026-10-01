@@ -74,3 +74,18 @@ def abb_packet(stream_id, sequence_num, byte_bus_id, word1, payload, sv=1, mtv=0
     """The packet minerva sends for an ABB message: the record, then the
     payload without its pad."""
     return abb_record(stream_id, sequence_num, byte_bus_id, word1, len(payload), sv=sv, mtv=mtv) + payload
+
+
+def abb_tx_record(stream_id, sequence_num, byte_bus_id, word1, payload_len, dst_mac, sv=1, mtv=0):
+    """The six record words minerva_tx_deparse takes for an ABB message, as
+    the bytes a source sends: the RX record, then the destination address,
+    bits 47:16 in word 4 and 15:0 in the top of word 5, whose low 16 bits are
+    reserved as 0."""
+    return (abb_record(stream_id, sequence_num, byte_bus_id, word1, payload_len, sv=sv, mtv=mtv) +
+            struct.pack('<II', dst_mac >> 16, (dst_mac & 0xffff) << 16))
+
+
+def abb_tx_packet(stream_id, sequence_num, byte_bus_id, word1, payload, dst_mac, sv=1, mtv=0):
+    """The packet a producer sends minerva_tx_deparse for an ABB message: the
+    six-word record, then the payload without its pad."""
+    return abb_tx_record(stream_id, sequence_num, byte_bus_id, word1, len(payload), dst_mac, sv=sv, mtv=mtv) + payload

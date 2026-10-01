@@ -24,24 +24,35 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge
 from cocotb.regression import TestFactory
 
-from cocotbext.axi import AxiStreamBus, AxiStreamSource, AxiStreamSink
+from cocotbext.axi import AxiStreamBus, AxiStreamFrame, AxiStreamSource, AxiStreamSink
 
 try:
     from axis_stable import check_axis_stable
+    import avtp
 except ImportError:
     # attempt import from current directory
     sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
     try:
         from axis_stable import check_axis_stable
+        import avtp
     finally:
         del sys.path[0]
 
 
 ETHERTYPE_AVTP = 0x22F0
-ETHERTYPE_PTP = 0x88F7
 
-# matches PARAM_LOCAL_MAC; every byte differs so a misplaced lane shows
-LOCAL_MAC = '5A:51:52:53:54:55'
+# demux port for AVTP, as in the RTL route table
+ROUTE_AVTP = 0
+
+# every byte differs so a misplaced lane shows
+LOCAL_MAC = 0x5A5152535455
+HOST_MAC = 0xDAD1D2D3D4D5
+
+# the talker's stream: the local MAC, UniqueID 0
+STREAM_ID = LOCAL_MAC << 16
+
+# expected for a frame that must end with tuser set
+BAD = object()
 
 
 class TB(object):
@@ -57,6 +68,8 @@ class TB(object):
         self.sink = AxiStreamSink(AxiStreamBus.from_entity(dut.m_axis_mac_tx), dut.clk, dut.rst)
 
         cocotb.start_soon(check_axis_stable(self.sink.bus, dut.clk, dut.rst))
+
+        dut.cfg_local_mac.setimmediatevalue(LOCAL_MAC)
 
     def set_idle_generator(self, generator=None):
         if generator:
@@ -78,13 +91,8 @@ class TB(object):
         await RisingEdge(self.dut.clk)
 
 
-def prefixed(dst, ethertype, payload):
-    """Deparser input: destination and ethertype in wire order, then payload."""
-    return bytes.fromhex(dst.replace(':', '')) + ethertype.to_bytes(2, 'big') + payload
-
-
-def l2_frame(dst, ethertype, payload):
-    return bytes(Ether(dst=dst, src=LOCAL_MAC, type=ethertype) / Raw(payload))
+def mac_str(mac):
+    return ':'.join(f'{b:02x}' for b in mac.to_bytes(6, 'big'))
 
 
 def payload_data(n, seed):
@@ -95,8 +103,62 @@ def last_tuser(frame):
     return frame.tuser[-1] if isinstance(frame.tuser, list) else frame.tuser
 
 
+def message(k, payload, dst=HOST_MAC, src=LOCAL_MAC, sv=1):
+    """A producer packet for an ABB message with fields varied by k, and the
+    frame minerva_tx_deparse builds from it, before the MAC pads it."""
+    sequence_num = (0xfd + k) & 0xff
+    byte_bus_id = (0x5ff + 0x123 * k) & 0x7ff
+    mtv = k & 1
+    word1 = avtp.abb_word1(evt=k & 0xf, hs=k & 1, cs=(k >> 1) & 1,
+                           transaction_num=(0x40 + k) & 0xff, op=(k >> 2) & 1,
+                           rsp=(k >> 3) & 1, err=(k >> 1) & 1, ms=k & 1,
+                           read_size=(0xbff - k) & 0xfff)
+    pkt = avtp.abb_tx_packet(STREAM_ID, sequence_num, byte_bus_id, word1, payload, dst, sv=sv, mtv=mtv)
+    pdu = avtp.ntscf_pdu(STREAM_ID, sequence_num, [avtp.abb_message(byte_bus_id, mtv, word1, payload)], sv=sv)
+    frame = bytes(Ether(dst=mac_str(dst), src=mac_str(src), type=ETHERTYPE_AVTP) / Raw(pdu))
+    return pkt, frame
+
+
+def send_frame(pkt, tid=avtp.FORMAT_ABB, tdest=ROUTE_AVTP, abort=False):
+    """The input frame for a packet; abort sets tuser on its last beat only."""
+    tuser = [0] * (len(pkt) - 1) + [1] if abort else 0
+    return AxiStreamFrame(pkt, tid=tid, tdest=tdest, tuser=tuser)
+
+
+async def run_frames(tb, test_frames):
+    """Send each input and check what comes out, in order.
+
+    test_frames holds (input frame, expected), where expected is the frame
+    bytes, BAD for a frame that must end with tuser set, or None for an input
+    that must give nothing.
+    """
+    for frame, _ in test_frames:
+        await tb.source.send(frame)
+
+    for _, expected in test_frames:
+        if expected is None:
+            continue
+
+        rx_frame = await tb.sink.recv()
+
+        if expected is BAD:
+            assert last_tuser(rx_frame)
+        else:
+            assert not last_tuser(rx_frame)
+            assert bytes(rx_frame.tdata) == expected
+
+    # let any wrongly built frame surface
+    await tb.source.wait()
+    for k in range(20):
+        await RisingEdge(tb.dut.clk)
+
+    assert tb.sink.empty()
+
+
+
 async def run_test_frame(dut, idle_inserter=None, backpressure_inserter=None):
-    """The header comes out in wire order at every tail alignment."""
+    """Each record and payload gives the frame for it, byte for byte, at every
+    pad, with every record field placed where it belongs."""
 
     tb = TB(dut)
 
@@ -107,29 +169,17 @@ async def run_test_frame(dut, idle_inserter=None, backpressure_inserter=None):
 
     test_frames = []
 
-    for ethertype in (ETHERTYPE_AVTP, ETHERTYPE_PTP):
-        for dst in ('DA:D1:D2:D3:D4:D5', 'FF:FF:FF:FF:FF:FF'):
-            for n in list(range(1, 9)) + list(range(46, 54)) + [1500]:
-                payload = payload_data(n, len(test_frames))
-                test_frames.append((prefixed(dst, ethertype, payload), l2_frame(dst, ethertype, payload)))
+    # every pad twice over, sv both ways, and the largest payload a frame holds
+    for n in list(range(9)) + [1480]:
+        k = len(test_frames)
+        pkt, frame = message(k, payload_data(n, k), sv=(k >> 1) & 1)
+        test_frames.append((send_frame(pkt), frame))
 
-    for pkt, _ in test_frames:
-        await tb.source.send(pkt)
-
-    for _, frame in test_frames:
-        rx_frame = await tb.sink.recv()
-
-        assert bytes(rx_frame.tdata) == frame
-        assert rx_frame.tuser == 0
-
-    assert tb.sink.empty()
-
-    await RisingEdge(dut.clk)
-    await RisingEdge(dut.clk)
+    await run_frames(tb, test_frames)
 
 
-async def run_test_bad_prefix(dut, idle_inserter=None, backpressure_inserter=None):
-    """A packet ending inside the prefix is closed out bad, neighbours intact."""
+async def run_test_local_mac(dut, idle_inserter=None, backpressure_inserter=None):
+    """The source address is cfg_local_mac as each record began."""
 
     tb = TB(dut)
 
@@ -138,38 +188,103 @@ async def run_test_bad_prefix(dut, idle_inserter=None, backpressure_inserter=Non
     tb.set_idle_generator(idle_inserter)
     tb.set_backpressure_generator(backpressure_inserter)
 
-    dst = 'DA:D1:D2:D3:D4:D5'
-    good = prefixed(dst, ETHERTYPE_AVTP, payload_data(46, 1))
-    later = prefixed(dst, ETHERTYPE_PTP, payload_data(47, 2))
+    for k, mac in enumerate([LOCAL_MAC, 0x021122334455, 0x02AABBCCDDEE]):
+        dut.cfg_local_mac.value = mac
 
-    # (input packet, expected frame or None if it must be marked bad)
-    test_pkts = [
-        (good, l2_frame(dst, ETHERTYPE_AVTP, payload_data(46, 1))),
-        # ends in the first prefix word
-        (good[:4], None),
-        # ends in the second prefix word
-        (good[:6], None),
-        # prefix but no payload
-        (good[:8], None),
-        (later, l2_frame(dst, ETHERTYPE_PTP, payload_data(47, 2))),
-    ]
+        pkt, frame = message(k, payload_data(k + 5, k), src=mac)
+        await tb.source.send(send_frame(pkt))
 
-    for pkt, _ in test_pkts:
-        await tb.source.send(pkt)
-
-    for _, frame in test_pkts:
         rx_frame = await tb.sink.recv()
+        assert not last_tuser(rx_frame)
+        assert bytes(rx_frame.tdata) == frame
 
-        if frame is None:
-            assert last_tuser(rx_frame) == 1
-        else:
-            assert bytes(rx_frame.tdata) == frame
-            assert rx_frame.tuser == 0
 
-    assert tb.sink.empty()
+async def run_test_drop(dut, idle_inserter=None, backpressure_inserter=None):
+    """A record that cannot become a frame gives nothing, and leaves its
+    neighbours intact."""
 
-    await RisingEdge(dut.clk)
-    await RisingEdge(dut.clk)
+    tb = TB(dut)
+
+    await tb.reset()
+
+    tb.set_idle_generator(idle_inserter)
+    tb.set_backpressure_generator(backpressure_inserter)
+
+    test_frames = []
+
+    def good():
+        k = len(test_frames)
+        pkt, frame = message(k, payload_data(k % 7, k))
+        test_frames.append((send_frame(pkt), frame))
+
+    def drop(frame):
+        test_frames.append((frame, None))
+
+    def record(payload_len):
+        return avtp.abb_tx_record(STREAM_ID, 1, 0x123, 0, payload_len, HOST_MAC)
+
+    good()
+
+    # an unknown format or route
+    drop(send_frame(message(1, payload_data(4, 0))[0], tid=1))
+    drop(send_frame(message(2, payload_data(4, 0))[0], tdest=1))
+
+    good()
+
+    # shorter than a record
+    for n in (4, 12, 20):
+        drop(send_frame(record(0)[:n]))
+
+    good()
+
+    # a payload the record does not announce, one it announces that is
+    # missing, and one too long for a frame
+    drop(send_frame(record(0) + payload_data(8, 0)))
+    drop(send_frame(record(4)))
+    drop(send_frame(record(1481) + payload_data(1481, 0)))
+
+    # a record alone, aborted
+    drop(send_frame(record(0), abort=True))
+
+    good()
+
+    await run_frames(tb, test_frames)
+
+
+async def run_test_bad(dut, idle_inserter=None, backpressure_inserter=None):
+    """A payload that ends short or long, or is aborted, ends its frame with
+    tuser set, and leaves its neighbours intact."""
+
+    tb = TB(dut)
+
+    await tb.reset()
+
+    tb.set_idle_generator(idle_inserter)
+    tb.set_backpressure_generator(backpressure_inserter)
+
+    test_frames = []
+
+    def good():
+        k = len(test_frames)
+        pkt, frame = message(k, payload_data(k % 7 + 1, k))
+        test_frames.append((send_frame(pkt), frame))
+
+    def record(payload_len):
+        return avtp.abb_tx_record(STREAM_ID, 1, 0x123, 0, payload_len, HOST_MAC)
+
+    good()
+
+    # short and long, within the last word and by whole words
+    for payload_len, n in [(10, 9), (10, 6), (10, 11), (10, 15), (4, 3), (4, 5)]:
+        test_frames.append((send_frame(record(payload_len) + payload_data(n, 0)), BAD))
+        good()
+
+    # aborted at the end of a payload that matches its record
+    test_frames.append((send_frame(message(9, payload_data(13, 0))[0], abort=True), BAD))
+
+    good()
+
+    await run_frames(tb, test_frames)
 
 
 def cycle_pause():
@@ -178,7 +293,7 @@ def cycle_pause():
 
 if getattr(cocotb, 'top', None) is not None:
 
-    for test in [run_test_frame, run_test_bad_prefix]:
+    for test in [run_test_frame, run_test_local_mac, run_test_drop, run_test_bad]:
 
         factory = TestFactory(test)
         factory.add_option("idle_inserter", [None, cycle_pause])
@@ -222,7 +337,8 @@ def test_minerva_tx_deparse(request):
 
     parameters = {}
 
-    parameters['LOCAL_MAC'] = "48'h5A5152535455"
+    parameters['ID_W'] = 4
+    parameters['DEST_W'] = 1
 
     extra_env = {f'PARAM_{k}': str(v) for k, v in parameters.items()}
 

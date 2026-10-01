@@ -33,7 +33,8 @@ uniq_base = $(if $1,$(call uniq_base,$(foreach f,$1,$(if $(filter-out $(notdir $
 VERILOG_SOURCES := $(call uniq_base,$(call process_f_files,$(VERILOG_SOURCES)))
 
 # module parameters
-export PARAM_LOCAL_MAC := "48'h5A5152535455"
+export PARAM_ID_W := 4
+export PARAM_DEST_W := 1
 
 ifeq ($(SIM), icarus)
 	PLUSARGS += -fst
