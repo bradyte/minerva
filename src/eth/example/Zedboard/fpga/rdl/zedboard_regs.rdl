@@ -27,6 +27,12 @@ addrmap zedboard_regs {
         field { sw = r; hw = w; } data[7:0];
     };
 
+    reg local_mac_byte {
+        name = "Local MAC";
+        desc = "The device's MAC address, LOCAL_MAC_0 = bits 7:0. It resets to 02:00:00:00:00:01.";
+        field { sw = rw; hw = r; } data[7:0] = 0;
+    };
+
     regfile {
         name = "Diagnostics";
 
@@ -88,7 +94,20 @@ addrmap zedboard_regs {
             field { sw = rw; hw = r; swmod; } tap[4:0] = 12;
         } IDELAY_TAP @ 0xD;
 
-        // 0x10-0x15 reserved for LOCAL_MAC_0..5
-
     } diag @ 0x1000;
+
+    regfile {
+        name = "Network";
+
+        local_mac_byte LOCAL_MAC_0 @ 0x0;
+        local_mac_byte LOCAL_MAC_1 @ 0x1;
+        local_mac_byte LOCAL_MAC_2 @ 0x2;
+        local_mac_byte LOCAL_MAC_3 @ 0x3;
+        local_mac_byte LOCAL_MAC_4 @ 0x4;
+        local_mac_byte LOCAL_MAC_5 @ 0x5;
+
+        LOCAL_MAC_0.data->reset = 8'h01;
+        LOCAL_MAC_5.data->reset = 8'h02;
+
+    } net @ 0x1100;
 };

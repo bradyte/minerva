@@ -9,11 +9,12 @@ Don't override. Generated from: zedboard_regs
 
 - Absolute Address: 0x0
 - Base Offset: 0x0
-- Size: 0x100E
+- Size: 0x1106
 
 |Offset|Identifier|    Name   |
 |------|----------|-----------|
 |0x1000|   diag   |Diagnostics|
+|0x1100|    net   |  Network  |
 
 ## diag register file
 
@@ -229,3 +230,90 @@ Don't override. Generated from: zedboard_regs
 |Bits|Identifier|Access|Reset|Name|
 |----|----------|------|-----|----|
 | 4:0|    tap   |  rw  | 0xC |  — |
+
+## net register file
+
+- Absolute Address: 0x1100
+- Base Offset: 0x1100
+- Size: 0x6
+
+|Offset| Identifier|   Name  |
+|------|-----------|---------|
+|  0x0 |LOCAL_MAC_0|Local MAC|
+|  0x1 |LOCAL_MAC_1|Local MAC|
+|  0x2 |LOCAL_MAC_2|Local MAC|
+|  0x3 |LOCAL_MAC_3|Local MAC|
+|  0x4 |LOCAL_MAC_4|Local MAC|
+|  0x5 |LOCAL_MAC_5|Local MAC|
+
+### LOCAL_MAC_0 register
+
+- Absolute Address: 0x1100
+- Base Offset: 0x0
+- Size: 0x1
+
+<p>The device's MAC address, LOCAL_MAC_0 = bits 7:0. It resets to 02:00:00:00:00:01.</p>
+
+|Bits|Identifier|Access|Reset|Name|
+|----|----------|------|-----|----|
+| 7:0|   data   |  rw  | 0x1 |  — |
+
+### LOCAL_MAC_1 register
+
+- Absolute Address: 0x1101
+- Base Offset: 0x1
+- Size: 0x1
+
+<p>The device's MAC address, LOCAL_MAC_0 = bits 7:0. It resets to 02:00:00:00:00:01.</p>
+
+|Bits|Identifier|Access|Reset|Name|
+|----|----------|------|-----|----|
+| 7:0|   data   |  rw  | 0x0 |  — |
+
+### LOCAL_MAC_2 register
+
+- Absolute Address: 0x1102
+- Base Offset: 0x2
+- Size: 0x1
+
+<p>The device's MAC address, LOCAL_MAC_0 = bits 7:0. It resets to 02:00:00:00:00:01.</p>
+
+|Bits|Identifier|Access|Reset|Name|
+|----|----------|------|-----|----|
+| 7:0|   data   |  rw  | 0x0 |  — |
+
+### LOCAL_MAC_3 register
+
+- Absolute Address: 0x1103
+- Base Offset: 0x3
+- Size: 0x1
+
+<p>The device's MAC address, LOCAL_MAC_0 = bits 7:0. It resets to 02:00:00:00:00:01.</p>
+
+|Bits|Identifier|Access|Reset|Name|
+|----|----------|------|-----|----|
+| 7:0|   data   |  rw  | 0x0 |  — |
+
+### LOCAL_MAC_4 register
+
+- Absolute Address: 0x1104
+- Base Offset: 0x4
+- Size: 0x1
+
+<p>The device's MAC address, LOCAL_MAC_0 = bits 7:0. It resets to 02:00:00:00:00:01.</p>
+
+|Bits|Identifier|Access|Reset|Name|
+|----|----------|------|-----|----|
+| 7:0|   data   |  rw  | 0x0 |  — |
+
+### LOCAL_MAC_5 register
+
+- Absolute Address: 0x1105
+- Base Offset: 0x5
+- Size: 0x1
+
+<p>The device's MAC address, LOCAL_MAC_0 = bits 7:0. It resets to 02:00:00:00:00:01.</p>
+
+|Bits|Identifier|Access|Reset|Name|
+|----|----------|------|-----|----|
+| 7:0|   data   |  rw  | 0x2 |  — |

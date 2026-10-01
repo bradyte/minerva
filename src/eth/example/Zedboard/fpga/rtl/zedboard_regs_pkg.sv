@@ -5,7 +5,7 @@ package zedboard_regs_pkg;
 
     localparam ZEDBOARD_REGS_DATA_WIDTH = 8;
     localparam ZEDBOARD_REGS_MIN_ADDR_WIDTH = 16;
-    localparam ZEDBOARD_REGS_SIZE = 'h100e;
+    localparam ZEDBOARD_REGS_SIZE = 'h1106;
 
     typedef struct {
         logic [7:0] next;
@@ -128,6 +128,40 @@ package zedboard_regs_pkg;
     } zedboard_regs__diag__out_t;
 
     typedef struct {
+        logic [7:0] value;
+    } zedboard_regs__local_mac_byte_data_f83cc53b__data_reset_1__out_t;
+
+    typedef struct {
+        zedboard_regs__local_mac_byte_data_f83cc53b__data_reset_1__out_t data;
+    } zedboard_regs__local_mac_byte_data_f83cc53b__out_t;
+
+    typedef struct {
+        logic [7:0] value;
+    } zedboard_regs__local_mac_byte__data__out_t;
+
+    typedef struct {
+        zedboard_regs__local_mac_byte__data__out_t data;
+    } zedboard_regs__local_mac_byte__out_t;
+
+    typedef struct {
+        logic [7:0] value;
+    } zedboard_regs__local_mac_byte_data_423adc62__data_reset_2__out_t;
+
+    typedef struct {
+        zedboard_regs__local_mac_byte_data_423adc62__data_reset_2__out_t data;
+    } zedboard_regs__local_mac_byte_data_423adc62__out_t;
+
+    typedef struct {
+        zedboard_regs__local_mac_byte_data_f83cc53b__out_t LOCAL_MAC_0;
+        zedboard_regs__local_mac_byte__out_t LOCAL_MAC_1;
+        zedboard_regs__local_mac_byte__out_t LOCAL_MAC_2;
+        zedboard_regs__local_mac_byte__out_t LOCAL_MAC_3;
+        zedboard_regs__local_mac_byte__out_t LOCAL_MAC_4;
+        zedboard_regs__local_mac_byte_data_423adc62__out_t LOCAL_MAC_5;
+    } zedboard_regs__net__out_t;
+
+    typedef struct {
         zedboard_regs__diag__out_t diag;
+        zedboard_regs__net__out_t net;
     } zedboard_regs__out_t;
 endpackage

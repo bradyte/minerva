@@ -103,6 +103,14 @@ module zedboard_regs (
             logic MDIO_RDATA_1;
             logic IDELAY_TAP;
         } diag;
+        struct {
+            logic LOCAL_MAC_0;
+            logic LOCAL_MAC_1;
+            logic LOCAL_MAC_2;
+            logic LOCAL_MAC_3;
+            logic LOCAL_MAC_4;
+            logic LOCAL_MAC_5;
+        } net;
     } decoded_reg_strb_t;
     decoded_reg_strb_t decoded_reg_strb;
     logic decoded_err;
@@ -131,6 +139,12 @@ module zedboard_regs (
         decoded_reg_strb.diag.MDIO_RDATA_0 = cpuif_req_masked & (cpuif_addr == 16'h100b) & !cpuif_req_is_wr;
         decoded_reg_strb.diag.MDIO_RDATA_1 = cpuif_req_masked & (cpuif_addr == 16'h100c) & !cpuif_req_is_wr;
         decoded_reg_strb.diag.IDELAY_TAP = cpuif_req_masked & (cpuif_addr == 16'h100d);
+        decoded_reg_strb.net.LOCAL_MAC_0 = cpuif_req_masked & (cpuif_addr == 16'h1100);
+        decoded_reg_strb.net.LOCAL_MAC_1 = cpuif_req_masked & (cpuif_addr == 16'h1101);
+        decoded_reg_strb.net.LOCAL_MAC_2 = cpuif_req_masked & (cpuif_addr == 16'h1102);
+        decoded_reg_strb.net.LOCAL_MAC_3 = cpuif_req_masked & (cpuif_addr == 16'h1103);
+        decoded_reg_strb.net.LOCAL_MAC_4 = cpuif_req_masked & (cpuif_addr == 16'h1104);
+        decoded_reg_strb.net.LOCAL_MAC_5 = cpuif_req_masked & (cpuif_addr == 16'h1105);
         decoded_err = '0;
     end
 
@@ -187,6 +201,44 @@ module zedboard_regs (
                 } tap;
             } IDELAY_TAP;
         } diag;
+        struct {
+            struct {
+                struct {
+                    logic [7:0] next;
+                    logic load_next;
+                } data;
+            } LOCAL_MAC_0;
+            struct {
+                struct {
+                    logic [7:0] next;
+                    logic load_next;
+                } data;
+            } LOCAL_MAC_1;
+            struct {
+                struct {
+                    logic [7:0] next;
+                    logic load_next;
+                } data;
+            } LOCAL_MAC_2;
+            struct {
+                struct {
+                    logic [7:0] next;
+                    logic load_next;
+                } data;
+            } LOCAL_MAC_3;
+            struct {
+                struct {
+                    logic [7:0] next;
+                    logic load_next;
+                } data;
+            } LOCAL_MAC_4;
+            struct {
+                struct {
+                    logic [7:0] next;
+                    logic load_next;
+                } data;
+            } LOCAL_MAC_5;
+        } net;
     } field_combo_t;
     field_combo_t field_combo;
 
@@ -226,6 +278,38 @@ module zedboard_regs (
                 } tap;
             } IDELAY_TAP;
         } diag;
+        struct {
+            struct {
+                struct {
+                    logic [7:0] value;
+                } data;
+            } LOCAL_MAC_0;
+            struct {
+                struct {
+                    logic [7:0] value;
+                } data;
+            } LOCAL_MAC_1;
+            struct {
+                struct {
+                    logic [7:0] value;
+                } data;
+            } LOCAL_MAC_2;
+            struct {
+                struct {
+                    logic [7:0] value;
+                } data;
+            } LOCAL_MAC_3;
+            struct {
+                struct {
+                    logic [7:0] value;
+                } data;
+            } LOCAL_MAC_4;
+            struct {
+                struct {
+                    logic [7:0] value;
+                } data;
+            } LOCAL_MAC_5;
+        } net;
     } field_storage_t;
     field_storage_t field_storage;
 
@@ -393,6 +477,144 @@ module zedboard_regs (
     end
     assign hwif_out.diag.IDELAY_TAP.tap.value = field_storage.diag.IDELAY_TAP.tap.value;
     assign hwif_out.diag.IDELAY_TAP.tap.swmod = decoded_reg_strb.diag.IDELAY_TAP && decoded_req_is_wr && |(decoded_wr_biten[4:0]);
+    // Field: zedboard_regs.net.LOCAL_MAC_0.data
+    always_comb begin
+        automatic logic [7:0] next_c;
+        automatic logic load_next_c;
+        next_c = field_storage.net.LOCAL_MAC_0.data.value;
+        load_next_c = '0;
+        if(decoded_reg_strb.net.LOCAL_MAC_0 && decoded_req_is_wr) begin // SW write
+            next_c = (field_storage.net.LOCAL_MAC_0.data.value & ~decoded_wr_biten[7:0]) | (decoded_wr_data[7:0] & decoded_wr_biten[7:0]);
+            load_next_c = '1;
+        end
+        field_combo.net.LOCAL_MAC_0.data.next = next_c;
+        field_combo.net.LOCAL_MAC_0.data.load_next = load_next_c;
+    end
+    always_ff @(posedge clk) begin
+        if(rst) begin
+            field_storage.net.LOCAL_MAC_0.data.value <= 8'h1;
+        end else begin
+            if(field_combo.net.LOCAL_MAC_0.data.load_next) begin
+                field_storage.net.LOCAL_MAC_0.data.value <= field_combo.net.LOCAL_MAC_0.data.next;
+            end
+        end
+    end
+    assign hwif_out.net.LOCAL_MAC_0.data.value = field_storage.net.LOCAL_MAC_0.data.value;
+    // Field: zedboard_regs.net.LOCAL_MAC_1.data
+    always_comb begin
+        automatic logic [7:0] next_c;
+        automatic logic load_next_c;
+        next_c = field_storage.net.LOCAL_MAC_1.data.value;
+        load_next_c = '0;
+        if(decoded_reg_strb.net.LOCAL_MAC_1 && decoded_req_is_wr) begin // SW write
+            next_c = (field_storage.net.LOCAL_MAC_1.data.value & ~decoded_wr_biten[7:0]) | (decoded_wr_data[7:0] & decoded_wr_biten[7:0]);
+            load_next_c = '1;
+        end
+        field_combo.net.LOCAL_MAC_1.data.next = next_c;
+        field_combo.net.LOCAL_MAC_1.data.load_next = load_next_c;
+    end
+    always_ff @(posedge clk) begin
+        if(rst) begin
+            field_storage.net.LOCAL_MAC_1.data.value <= 8'h0;
+        end else begin
+            if(field_combo.net.LOCAL_MAC_1.data.load_next) begin
+                field_storage.net.LOCAL_MAC_1.data.value <= field_combo.net.LOCAL_MAC_1.data.next;
+            end
+        end
+    end
+    assign hwif_out.net.LOCAL_MAC_1.data.value = field_storage.net.LOCAL_MAC_1.data.value;
+    // Field: zedboard_regs.net.LOCAL_MAC_2.data
+    always_comb begin
+        automatic logic [7:0] next_c;
+        automatic logic load_next_c;
+        next_c = field_storage.net.LOCAL_MAC_2.data.value;
+        load_next_c = '0;
+        if(decoded_reg_strb.net.LOCAL_MAC_2 && decoded_req_is_wr) begin // SW write
+            next_c = (field_storage.net.LOCAL_MAC_2.data.value & ~decoded_wr_biten[7:0]) | (decoded_wr_data[7:0] & decoded_wr_biten[7:0]);
+            load_next_c = '1;
+        end
+        field_combo.net.LOCAL_MAC_2.data.next = next_c;
+        field_combo.net.LOCAL_MAC_2.data.load_next = load_next_c;
+    end
+    always_ff @(posedge clk) begin
+        if(rst) begin
+            field_storage.net.LOCAL_MAC_2.data.value <= 8'h0;
+        end else begin
+            if(field_combo.net.LOCAL_MAC_2.data.load_next) begin
+                field_storage.net.LOCAL_MAC_2.data.value <= field_combo.net.LOCAL_MAC_2.data.next;
+            end
+        end
+    end
+    assign hwif_out.net.LOCAL_MAC_2.data.value = field_storage.net.LOCAL_MAC_2.data.value;
+    // Field: zedboard_regs.net.LOCAL_MAC_3.data
+    always_comb begin
+        automatic logic [7:0] next_c;
+        automatic logic load_next_c;
+        next_c = field_storage.net.LOCAL_MAC_3.data.value;
+        load_next_c = '0;
+        if(decoded_reg_strb.net.LOCAL_MAC_3 && decoded_req_is_wr) begin // SW write
+            next_c = (field_storage.net.LOCAL_MAC_3.data.value & ~decoded_wr_biten[7:0]) | (decoded_wr_data[7:0] & decoded_wr_biten[7:0]);
+            load_next_c = '1;
+        end
+        field_combo.net.LOCAL_MAC_3.data.next = next_c;
+        field_combo.net.LOCAL_MAC_3.data.load_next = load_next_c;
+    end
+    always_ff @(posedge clk) begin
+        if(rst) begin
+            field_storage.net.LOCAL_MAC_3.data.value <= 8'h0;
+        end else begin
+            if(field_combo.net.LOCAL_MAC_3.data.load_next) begin
+                field_storage.net.LOCAL_MAC_3.data.value <= field_combo.net.LOCAL_MAC_3.data.next;
+            end
+        end
+    end
+    assign hwif_out.net.LOCAL_MAC_3.data.value = field_storage.net.LOCAL_MAC_3.data.value;
+    // Field: zedboard_regs.net.LOCAL_MAC_4.data
+    always_comb begin
+        automatic logic [7:0] next_c;
+        automatic logic load_next_c;
+        next_c = field_storage.net.LOCAL_MAC_4.data.value;
+        load_next_c = '0;
+        if(decoded_reg_strb.net.LOCAL_MAC_4 && decoded_req_is_wr) begin // SW write
+            next_c = (field_storage.net.LOCAL_MAC_4.data.value & ~decoded_wr_biten[7:0]) | (decoded_wr_data[7:0] & decoded_wr_biten[7:0]);
+            load_next_c = '1;
+        end
+        field_combo.net.LOCAL_MAC_4.data.next = next_c;
+        field_combo.net.LOCAL_MAC_4.data.load_next = load_next_c;
+    end
+    always_ff @(posedge clk) begin
+        if(rst) begin
+            field_storage.net.LOCAL_MAC_4.data.value <= 8'h0;
+        end else begin
+            if(field_combo.net.LOCAL_MAC_4.data.load_next) begin
+                field_storage.net.LOCAL_MAC_4.data.value <= field_combo.net.LOCAL_MAC_4.data.next;
+            end
+        end
+    end
+    assign hwif_out.net.LOCAL_MAC_4.data.value = field_storage.net.LOCAL_MAC_4.data.value;
+    // Field: zedboard_regs.net.LOCAL_MAC_5.data
+    always_comb begin
+        automatic logic [7:0] next_c;
+        automatic logic load_next_c;
+        next_c = field_storage.net.LOCAL_MAC_5.data.value;
+        load_next_c = '0;
+        if(decoded_reg_strb.net.LOCAL_MAC_5 && decoded_req_is_wr) begin // SW write
+            next_c = (field_storage.net.LOCAL_MAC_5.data.value & ~decoded_wr_biten[7:0]) | (decoded_wr_data[7:0] & decoded_wr_biten[7:0]);
+            load_next_c = '1;
+        end
+        field_combo.net.LOCAL_MAC_5.data.next = next_c;
+        field_combo.net.LOCAL_MAC_5.data.load_next = load_next_c;
+    end
+    always_ff @(posedge clk) begin
+        if(rst) begin
+            field_storage.net.LOCAL_MAC_5.data.value <= 8'h2;
+        end else begin
+            if(field_combo.net.LOCAL_MAC_5.data.load_next) begin
+                field_storage.net.LOCAL_MAC_5.data.value <= field_combo.net.LOCAL_MAC_5.data.next;
+            end
+        end
+    end
+    assign hwif_out.net.LOCAL_MAC_5.data.value = field_storage.net.LOCAL_MAC_5.data.value;
 
     //--------------------------------------------------------------------------
     // Write response
@@ -459,6 +681,24 @@ module zedboard_regs (
         end
         if(rd_mux_addr == 16'h100d) begin
             readback_data_var[4:0] = field_storage.diag.IDELAY_TAP.tap.value;
+        end
+        if(rd_mux_addr == 16'h1100) begin
+            readback_data_var[7:0] = field_storage.net.LOCAL_MAC_0.data.value;
+        end
+        if(rd_mux_addr == 16'h1101) begin
+            readback_data_var[7:0] = field_storage.net.LOCAL_MAC_1.data.value;
+        end
+        if(rd_mux_addr == 16'h1102) begin
+            readback_data_var[7:0] = field_storage.net.LOCAL_MAC_2.data.value;
+        end
+        if(rd_mux_addr == 16'h1103) begin
+            readback_data_var[7:0] = field_storage.net.LOCAL_MAC_3.data.value;
+        end
+        if(rd_mux_addr == 16'h1104) begin
+            readback_data_var[7:0] = field_storage.net.LOCAL_MAC_4.data.value;
+        end
+        if(rd_mux_addr == 16'h1105) begin
+            readback_data_var[7:0] = field_storage.net.LOCAL_MAC_5.data.value;
         end
         readback_data = readback_data_var;
         readback_done = decoded_req & ~decoded_req_is_wr;

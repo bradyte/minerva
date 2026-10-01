@@ -130,7 +130,8 @@ class TB:
         assert rx_pkt.payload[:4] == pkt.payload[:4]
 
 
-# host and board addresses; LOCAL_MAC matches fpga_core
+# host and board addresses; LOCAL_MAC matches fpga_core and the LOCAL_MAC
+# register's reset value
 HOST_MAC = bytes.fromhex('5a5152535455')
 LOCAL_MAC = bytes.fromhex('020000000001')
 BCAST = b'\xff' * 6
@@ -157,6 +158,7 @@ REG_MDIO_REG = 0x1007
 REG_MDIO_CTRL = 0x100A
 REG_MDIO_RDATA_0 = 0x100B
 REG_IDELAY_TAP = 0x100D
+REG_LOCAL_MAC_0 = 0x1100
 
 PHY_STATUS_PRESENT = 0x01
 PHY_STATUS_INIT_DONE = 0x02
@@ -310,6 +312,13 @@ async def registers_test(tb):
 
     assert loads == [20]
     assert await tb.xfcp_read(XFCP_REGS, REG_IDELAY_TAP, 1) == bytes([20])
+
+    # the local MAC resets to LOCAL_MAC, LSB first, and reads back what was
+    # written
+    assert await tb.xfcp_read(XFCP_REGS, REG_LOCAL_MAC_0, 6) == LOCAL_MAC[::-1]
+    await tb.xfcp_write(XFCP_REGS, REG_LOCAL_MAC_0, bytes(range(0x10, 0x16)))
+    assert await tb.xfcp_read(XFCP_REGS, REG_LOCAL_MAC_0, 6) == bytes(range(0x10, 0x16))
+    await tb.xfcp_write(XFCP_REGS, REG_LOCAL_MAC_0, LOCAL_MAC[::-1])
 
     # the PHY: adin1300_init waits 5 ms after reset before it scans
     for k in range(100):
