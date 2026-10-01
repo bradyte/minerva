@@ -18,7 +18,7 @@ Authors:
  * Turns a held request into one clause 22 read or write.  Driven by the VIO in
  * dig_top.
  */
-module mdio_cmd (
+module adin1300_mdio_cmd (
     input  wire logic         clk,
     input  wire logic         rst,
 

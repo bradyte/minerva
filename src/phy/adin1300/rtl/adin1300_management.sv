@@ -19,7 +19,7 @@ Authors:
  * holds source 0 of the arbiter; the request port is source 1, left free for
  * whatever drives it - a VIO today, the PS or a register block later.
  */
-module phy_management #
+module adin1300_management #
 (
     // 125 MHz / (2 * (1 + 24)) = 2.5 MHz MDC, inside the 2.5 MHz ceiling
     // clause 22 specifies
@@ -84,8 +84,8 @@ taxi_axis_if #(.DATA_W(16), .KEEP_W(1), .KEEP_EN(0)) axis_rd[2]();
 taxi_axis_if #(.DATA_W(32), .KEEP_W(1), .KEEP_EN(0)) axis_cmd_int();
 taxi_axis_if #(.DATA_W(16), .KEEP_W(1), .KEEP_EN(0)) axis_rd_int();
 
-phy_init
-phy_init_inst (
+adin1300_init
+adin1300_init_inst (
     .clk(clk),
     .rst(rst),
 
@@ -100,8 +100,8 @@ phy_init_inst (
     .done(phy_id_done)
 );
 
-mdio_cmd
-mdio_cmd_inst (
+adin1300_mdio_cmd
+adin1300_mdio_cmd_inst (
     .clk(clk),
     .rst(rst),
 
@@ -118,10 +118,10 @@ mdio_cmd_inst (
     .busy(req_busy)
 );
 
-mdio_arb #(
+adin1300_mdio_arb #(
     .S_COUNT(2)
 )
-mdio_arb_inst (
+adin1300_mdio_arb_inst (
     .clk(clk),
     .rst(rst),
 

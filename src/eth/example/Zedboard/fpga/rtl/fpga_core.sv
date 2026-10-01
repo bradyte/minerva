@@ -212,8 +212,8 @@ wire        phy_irq;
 wire [15:0] mdio_rd_data;
 wire        mdio_busy;
 
-phy_management
-phy_management_inst (
+adin1300_management
+adin1300_management_inst (
     .clk(clk),
     .rst(rst),
 

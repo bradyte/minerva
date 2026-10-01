@@ -135,13 +135,13 @@ lib_dir = os.path.abspath(os.path.join(tests_dir, '..', '..', 'lib'))
 taxi_src_dir = os.path.abspath(os.path.join(lib_dir, 'taxi', 'src'))
 
 
-def test_phy_init(request):
+def test_adin1300_init(request):
     module = os.path.splitext(os.path.basename(__file__))[0]
     toplevel = module
 
     verilog_sources = [
         os.path.join(tests_dir, f"{toplevel}.sv"),
-        os.path.join(rtl_dir, "phy_init.sv"),
+        os.path.join(rtl_dir, "adin1300_init.sv"),
         os.path.join(taxi_src_dir, "lss", "rtl", "taxi_mdio_master.sv"),
         os.path.join(taxi_src_dir, "axis", "rtl", "taxi_axis_if.sv"),
     ]

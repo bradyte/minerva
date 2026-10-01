@@ -1,7 +1,7 @@
-phy_management.sv
-phy_init.sv
-mdio_cmd.sv
-mdio_arb.sv
+adin1300_management.sv
+adin1300_init.sv
+adin1300_mdio_cmd.sv
+adin1300_mdio_arb.sv
 ../lib/taxi/src/lss/rtl/taxi_mdio_master.sv
 ../lib/taxi/src/axis/rtl/taxi_axis_arb_mux.f
 ../lib/taxi/src/axis/rtl/taxi_axis_demux.sv

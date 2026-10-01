@@ -311,7 +311,7 @@ async def registers_test(tb):
     assert loads == [20]
     assert await tb.xfcp_read(XFCP_REGS, REG_IDELAY_TAP, 1) == bytes([20])
 
-    # the PHY: phy_init waits 5 ms after reset before it scans
+    # the PHY: adin1300_init waits 5 ms after reset before it scans
     for k in range(100):
         status = (await tb.xfcp_read(XFCP_REGS, REG_PHY_STATUS, 1))[0]
         if status & PHY_STATUS_INIT_DONE:
@@ -341,7 +341,7 @@ async def run_test(dut):
 
     rx_count, tx_count = await record_echo_test(tb, tb.baset_phy.rx, tb.baset_phy.tx)
 
-    # INT_N reaches PHY_STATUS through phy_management, active high
+    # INT_N reaches PHY_STATUS through adin1300_management, active high
     assert not (await tb.xfcp_read(XFCP_REGS, REG_PHY_STATUS, 1))[0] & PHY_STATUS_IRQ
     dut.phy_int_n.value = 0
     for k in range(4):
@@ -408,7 +408,7 @@ def test_fpga_core(request):
         os.path.join(taxi_src_dir, "xfcp", "rtl", "taxi_xfcp_switch.sv"),
         os.path.join(taxi_src_dir, "xfcp", "rtl", "taxi_xfcp_mod_stats.f"),
         os.path.join(taxi_src_dir, "xfcp", "rtl", "taxi_xfcp_mod_apb.f"),
-        os.path.join(taxi_src_dir, "phy", "adin1300", "rtl", "phy_management.f"),
+        os.path.join(taxi_src_dir, "phy", "adin1300", "rtl", "adin1300_management.f"),
         os.path.join(taxi_src_dir, "axis", "rtl", "taxi_axis_fifo.sv"),
         os.path.join(taxi_src_dir, "axis", "rtl", "taxi_axis_null_snk.sv"),
         os.path.join(taxi_src_dir, "sync", "rtl", "taxi_sync_signal.sv"),

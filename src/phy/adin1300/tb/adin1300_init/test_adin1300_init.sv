@@ -15,10 +15,10 @@ Authors:
 /*
  * ADIN1300 bring-up sequencer testbench
  *
- * phy_init plus the MDIO master it drives, so the test exercises the real
+ * adin1300_init plus the MDIO master it drives, so the test exercises the real
  * clause 22 frame on the wire rather than the command stream in isolation.
  */
-module test_phy_init #
+module test_adin1300_init #
 (
     /* verilator lint_off WIDTHTRUNC */
     parameter logic [15:0] PHY_ID_1 = 16'h0283,
@@ -47,7 +47,7 @@ logic mdio_i;
 logic mdio_o;
 logic mdio_t;
 
-phy_init #(
+adin1300_init #(
     .PHY_ID_1(PHY_ID_1),
     .PHY_ID_2(PHY_ID_2),
     .RESET_LOW_CYCLES(RESET_LOW_CYCLES),

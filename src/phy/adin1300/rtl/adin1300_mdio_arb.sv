@@ -18,7 +18,7 @@ Authors:
  * Shares one taxi_mdio_master between command sources, source 0 highest
  * priority.
  */
-module mdio_arb #
+module adin1300_mdio_arb #
 (
     parameter S_COUNT = 2
 )

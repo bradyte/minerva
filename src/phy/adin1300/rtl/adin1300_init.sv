@@ -19,7 +19,7 @@ Authors:
  * address space for the PHY identity, then writes init_data to the PHY it
  * found.
  */
-module phy_init #
+module adin1300_init #
 (
     parameter logic [15:0] PHY_ID_1 = 16'h0283,
     parameter logic [15:0] PHY_ID_2 = 16'hBC30,
