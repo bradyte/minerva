@@ -293,10 +293,13 @@ taxi_eth_mac_1g_rgmii_fifo #(
     .STAT_UPDATE_PERIOD(1024),
     .STAT_STR_EN(1),
     .STAT_PREFIX_STR("BASET"),
+    // minerva relies on both FIFOs dropping bad frames
     .TX_FIFO_DEPTH(4096),
     .TX_FRAME_FIFO(1),
+    .TX_DROP_BAD_FRAME(1),
     .RX_FIFO_DEPTH(4096),
-    .RX_FRAME_FIFO(1)
+    .RX_FRAME_FIFO(1),
+    .RX_DROP_BAD_FRAME(1)
 )
 eth_mac_inst (
     .gtx_clk(clk),
