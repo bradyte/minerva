@@ -50,6 +50,7 @@ module minerva_rx_parse #
 localparam DATA_W = s_axis_mac_rx.DATA_W;
 localparam ID_W = m_axis_eth_rx.ID_W;
 localparam DEST_W = m_axis_eth_rx.DEST_W;
+localparam USER_W = m_axis_eth_rx.USER_W;
 
 // check configuration
 if (DATA_W != 32)
@@ -204,23 +205,20 @@ always_comb begin
     endcase
 end
 
-logic        s_axis_mac_rx_tready_int;
-logic [31:0] m_axis_eth_rx_tdata_int;
-logic [3:0]  m_axis_eth_rx_tkeep_int;
-logic        m_axis_eth_rx_tvalid_int;
-logic        m_axis_eth_rx_tlast_int;
-logic        m_axis_eth_rx_tuser_int;
+logic s_axis_mac_rx_tready_reg = 1'b0, s_axis_mac_rx_tready_next;
 
-assign s_axis_mac_rx.tready = s_axis_mac_rx_tready_int;
+// internal datapath
+logic [31:0]       m_axis_eth_rx_tdata_int;
+logic [3:0]        m_axis_eth_rx_tkeep_int;
+logic              m_axis_eth_rx_tvalid_int;
+logic              m_axis_eth_rx_tready_int_reg = 1'b0;
+logic              m_axis_eth_rx_tlast_int;
+logic [ID_W-1:0]   m_axis_eth_rx_tid_int;
+logic [DEST_W-1:0] m_axis_eth_rx_tdest_int;
+logic [USER_W-1:0] m_axis_eth_rx_tuser_int;
+wire               m_axis_eth_rx_tready_int_early;
 
-assign m_axis_eth_rx.tdata  = m_axis_eth_rx_tdata_int;
-assign m_axis_eth_rx.tkeep  = m_axis_eth_rx_tkeep_int;
-assign m_axis_eth_rx.tstrb  = m_axis_eth_rx.tkeep;
-assign m_axis_eth_rx.tvalid = m_axis_eth_rx_tvalid_int;
-assign m_axis_eth_rx.tlast  = m_axis_eth_rx_tlast_int;
-assign m_axis_eth_rx.tid    = FORMAT_ABB;
-assign m_axis_eth_rx.tdest  = route_reg;
-assign m_axis_eth_rx.tuser  = m_axis_eth_rx_tuser_int;
+assign s_axis_mac_rx.tready = s_axis_mac_rx_tready_reg;
 
 always_comb begin
     state_next = state_reg;
@@ -240,16 +238,21 @@ always_comb begin
     payload_len_next = payload_len_reg;
     abb_1_next = abb_1_reg;
 
-    s_axis_mac_rx_tready_int = 1'b1;
+    s_axis_mac_rx_tready_next = 1'b0;
+
     m_axis_eth_rx_tdata_int = record_word;
     m_axis_eth_rx_tkeep_int = 4'b1111;
     m_axis_eth_rx_tvalid_int = 1'b0;
     m_axis_eth_rx_tlast_int = 1'b0;
-    m_axis_eth_rx_tuser_int = 1'b0;
+    m_axis_eth_rx_tid_int = FORMAT_ABB;
+    m_axis_eth_rx_tdest_int = route_reg;
+    m_axis_eth_rx_tuser_int = '0;
 
     case (state_reg)
         STATE_ETH: begin
             // words 0 to 2 are addresses; the ethertype decides at word 3
+            s_axis_mac_rx_tready_next = 1'b1;
+
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
                 ptr_next = ptr_reg + 1;
 
@@ -265,6 +268,8 @@ always_comb begin
         STATE_VLAN: begin
             // the tag control information went by at word 3, so the inner
             // ethertype sits where the outer one did
+            s_axis_mac_rx_tready_next = 1'b1;
+
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
                 if (s_axis_mac_rx.tlast) begin
                     ptr_next = '0;
@@ -279,6 +284,8 @@ always_comb begin
         STATE_AVTP: begin
             // AVTP common header and the first NTSCF fields; only version 0
             // NTSCF is parsed
+            s_axis_mac_rx_tready_next = 1'b1;
+
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
                 sv_next = quad[23];
                 data_rem_next = quad[18:8];
@@ -295,6 +302,8 @@ always_comb begin
             end
         end
         STATE_NTSCF_1: begin
+            s_axis_mac_rx_tready_next = 1'b1;
+
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
                 stream_id_next[63:32] = quad;
 
@@ -307,6 +316,8 @@ always_comb begin
             end
         end
         STATE_NTSCF_2: begin
+            s_axis_mac_rx_tready_next = 1'b1;
+
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
                 stream_id_next[31:0] = quad;
 
@@ -324,6 +335,8 @@ always_comb begin
         STATE_ACF: begin
             // ACF common header and the first ABB fields; every length check
             // resolves here, before anything is sent
+            s_axis_mac_rx_tready_next = 1'b1;
+
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
                 mtv_next = quad[13];
                 byte_bus_id_next = quad[10:0];
@@ -352,6 +365,8 @@ always_comb begin
         end
         STATE_ABB_1: begin
             // the second ABB quadlet is record word 3 as it stands
+            s_axis_mac_rx_tready_next = 1'b1;
+
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
                 abb_1_next = quad;
                 ptr_next = '0;
@@ -363,38 +378,42 @@ always_comb begin
                     // payload, so nothing is sent
                     state_next = STATE_ETH;
                 end else begin
+                    // the input waits while the record goes out
+                    s_axis_mac_rx_tready_next = 1'b0;
                     state_next = STATE_RECORD;
                 end
             end
         end
         STATE_RECORD: begin
             // the record goes out while the input waits
-            s_axis_mac_rx_tready_int = 1'b0;
-            m_axis_eth_rx_tvalid_int = 1'b1;
-            m_axis_eth_rx_tlast_int = ptr_reg == 2'd3 && msg_rem_reg == 0;
-
-            if (m_axis_eth_rx.tready) begin
+            if (m_axis_eth_rx_tready_int_reg) begin
+                m_axis_eth_rx_tvalid_int = 1'b1;
+                m_axis_eth_rx_tlast_int = ptr_reg == 2'd3 && msg_rem_reg == 0;
                 ptr_next = ptr_reg + 1;
 
                 if (ptr_reg == 2'd3) begin
                     ptr_next = '0;
 
                     if (msg_rem_reg != 0) begin
+                        s_axis_mac_rx_tready_next = m_axis_eth_rx_tready_int_early;
                         state_next = STATE_PAYLOAD;
                     end else if (frame_end_reg) begin
+                        s_axis_mac_rx_tready_next = 1'b1;
                         state_next = STATE_ETH;
                     end else begin
+                        s_axis_mac_rx_tready_next = 1'b1;
                         state_next = data_rem_reg != 0 ? STATE_ACF : STATE_DROP;
                     end
                 end
             end
         end
         STATE_PAYLOAD: begin
-            // one shifted word out per word in; the payload stays in wire
-            // order
-            s_axis_mac_rx_tready_int = m_axis_eth_rx.tready;
+            // one shifted word out per word in, as fast as the output takes
+            // them; the payload stays in wire order
+            s_axis_mac_rx_tready_next = m_axis_eth_rx_tready_int_early;
+
             m_axis_eth_rx_tdata_int = shifted;
-            m_axis_eth_rx_tvalid_int = s_axis_mac_rx.tvalid;
+            m_axis_eth_rx_tvalid_int = s_axis_mac_rx.tvalid && s_axis_mac_rx.tready;
 
             if (msg_rem_reg == 9'd1) begin
                 // the last quadlet, less its pad
@@ -406,22 +425,26 @@ always_comb begin
                 // the frame ended before the message did; send what arrived
                 m_axis_eth_rx_tkeep_int = in_whole ? 4'b1111 : 4'b0111;
                 m_axis_eth_rx_tlast_int = 1'b1;
-                m_axis_eth_rx_tuser_int = 1'b1;
+                m_axis_eth_rx_tuser_int = USER_W'(1);
             end
 
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
                 msg_rem_next = msg_rem_reg - 1;
 
                 if (s_axis_mac_rx.tlast) begin
+                    s_axis_mac_rx_tready_next = 1'b1;
                     ptr_next = '0;
                     state_next = STATE_ETH;
                 end else if (msg_rem_reg == 9'd1) begin
+                    s_axis_mac_rx_tready_next = 1'b1;
                     state_next = data_rem_reg != 0 ? STATE_ACF : STATE_DROP;
                 end
             end
         end
         STATE_SKIP: begin
             // a message of another type, skipped by its length
+            s_axis_mac_rx_tready_next = 1'b1;
+
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
                 msg_rem_next = msg_rem_reg - 1;
 
@@ -434,6 +457,8 @@ always_comb begin
             end
         end
         STATE_DROP: begin
+            s_axis_mac_rx_tready_next = 1'b1;
+
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready && s_axis_mac_rx.tlast) begin
                 ptr_next = '0;
                 state_next = STATE_ETH;
@@ -463,6 +488,8 @@ always_ff @(posedge clk) begin
     payload_len_reg <= payload_len_next;
     abb_1_reg <= abb_1_next;
 
+    s_axis_mac_rx_tready_reg <= s_axis_mac_rx_tready_next;
+
     if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
         shift_reg <= s_axis_mac_rx.tdata[31:16];
     end
@@ -473,6 +500,107 @@ always_ff @(posedge clk) begin
         route_reg <= '0;
         frame_end_reg <= 1'b0;
         shift_reg <= '0;
+        s_axis_mac_rx_tready_reg <= 1'b0;
+    end
+end
+
+// output datapath logic
+logic [31:0]       m_axis_eth_rx_tdata_reg  = '0;
+logic [3:0]        m_axis_eth_rx_tkeep_reg  = '0;
+logic              m_axis_eth_rx_tvalid_reg = 1'b0, m_axis_eth_rx_tvalid_next;
+logic              m_axis_eth_rx_tlast_reg  = 1'b0;
+logic [ID_W-1:0]   m_axis_eth_rx_tid_reg    = '0;
+logic [DEST_W-1:0] m_axis_eth_rx_tdest_reg  = '0;
+logic [USER_W-1:0] m_axis_eth_rx_tuser_reg  = '0;
+
+logic [31:0]       temp_m_axis_eth_rx_tdata_reg  = '0;
+logic [3:0]        temp_m_axis_eth_rx_tkeep_reg  = '0;
+logic              temp_m_axis_eth_rx_tvalid_reg = 1'b0, temp_m_axis_eth_rx_tvalid_next;
+logic              temp_m_axis_eth_rx_tlast_reg  = 1'b0;
+logic [ID_W-1:0]   temp_m_axis_eth_rx_tid_reg    = '0;
+logic [DEST_W-1:0] temp_m_axis_eth_rx_tdest_reg  = '0;
+logic [USER_W-1:0] temp_m_axis_eth_rx_tuser_reg  = '0;
+
+// datapath control
+logic store_axis_int_to_output;
+logic store_axis_int_to_temp;
+logic store_axis_temp_to_output;
+
+assign m_axis_eth_rx.tdata  = m_axis_eth_rx_tdata_reg;
+assign m_axis_eth_rx.tkeep  = m_axis_eth_rx_tkeep_reg;
+assign m_axis_eth_rx.tstrb  = m_axis_eth_rx.tkeep;
+assign m_axis_eth_rx.tvalid = m_axis_eth_rx_tvalid_reg;
+assign m_axis_eth_rx.tlast  = m_axis_eth_rx_tlast_reg;
+assign m_axis_eth_rx.tid    = m_axis_eth_rx_tid_reg;
+assign m_axis_eth_rx.tdest  = m_axis_eth_rx_tdest_reg;
+assign m_axis_eth_rx.tuser  = m_axis_eth_rx_tuser_reg;
+
+// enable ready input next cycle if output is ready or the temp reg will not be filled on the next cycle (output reg empty or no input)
+assign m_axis_eth_rx_tready_int_early = m_axis_eth_rx.tready || (!temp_m_axis_eth_rx_tvalid_reg && (!m_axis_eth_rx_tvalid_reg || !m_axis_eth_rx_tvalid_int));
+
+always_comb begin
+    // transfer sink ready state to source
+    m_axis_eth_rx_tvalid_next = m_axis_eth_rx_tvalid_reg;
+    temp_m_axis_eth_rx_tvalid_next = temp_m_axis_eth_rx_tvalid_reg;
+
+    store_axis_int_to_output = 1'b0;
+    store_axis_int_to_temp = 1'b0;
+    store_axis_temp_to_output = 1'b0;
+
+    if (m_axis_eth_rx_tready_int_reg) begin
+        // input is ready
+        if (m_axis_eth_rx.tready || !m_axis_eth_rx_tvalid_reg) begin
+            // output is ready or currently not valid, transfer data to output
+            m_axis_eth_rx_tvalid_next = m_axis_eth_rx_tvalid_int;
+            store_axis_int_to_output = 1'b1;
+        end else begin
+            // output is not ready, store input in temp
+            temp_m_axis_eth_rx_tvalid_next = m_axis_eth_rx_tvalid_int;
+            store_axis_int_to_temp = 1'b1;
+        end
+    end else if (m_axis_eth_rx.tready) begin
+        // input is not ready, but output is ready
+        m_axis_eth_rx_tvalid_next = temp_m_axis_eth_rx_tvalid_reg;
+        temp_m_axis_eth_rx_tvalid_next = 1'b0;
+        store_axis_temp_to_output = 1'b1;
+    end
+end
+
+always_ff @(posedge clk) begin
+    m_axis_eth_rx_tvalid_reg <= m_axis_eth_rx_tvalid_next;
+    m_axis_eth_rx_tready_int_reg <= m_axis_eth_rx_tready_int_early;
+    temp_m_axis_eth_rx_tvalid_reg <= temp_m_axis_eth_rx_tvalid_next;
+
+    // datapath
+    if (store_axis_int_to_output) begin
+        m_axis_eth_rx_tdata_reg <= m_axis_eth_rx_tdata_int;
+        m_axis_eth_rx_tkeep_reg <= m_axis_eth_rx_tkeep_int;
+        m_axis_eth_rx_tlast_reg <= m_axis_eth_rx_tlast_int;
+        m_axis_eth_rx_tid_reg   <= m_axis_eth_rx_tid_int;
+        m_axis_eth_rx_tdest_reg <= m_axis_eth_rx_tdest_int;
+        m_axis_eth_rx_tuser_reg <= m_axis_eth_rx_tuser_int;
+    end else if (store_axis_temp_to_output) begin
+        m_axis_eth_rx_tdata_reg <= temp_m_axis_eth_rx_tdata_reg;
+        m_axis_eth_rx_tkeep_reg <= temp_m_axis_eth_rx_tkeep_reg;
+        m_axis_eth_rx_tlast_reg <= temp_m_axis_eth_rx_tlast_reg;
+        m_axis_eth_rx_tid_reg   <= temp_m_axis_eth_rx_tid_reg;
+        m_axis_eth_rx_tdest_reg <= temp_m_axis_eth_rx_tdest_reg;
+        m_axis_eth_rx_tuser_reg <= temp_m_axis_eth_rx_tuser_reg;
+    end
+
+    if (store_axis_int_to_temp) begin
+        temp_m_axis_eth_rx_tdata_reg <= m_axis_eth_rx_tdata_int;
+        temp_m_axis_eth_rx_tkeep_reg <= m_axis_eth_rx_tkeep_int;
+        temp_m_axis_eth_rx_tlast_reg <= m_axis_eth_rx_tlast_int;
+        temp_m_axis_eth_rx_tid_reg   <= m_axis_eth_rx_tid_int;
+        temp_m_axis_eth_rx_tdest_reg <= m_axis_eth_rx_tdest_int;
+        temp_m_axis_eth_rx_tuser_reg <= m_axis_eth_rx_tuser_int;
+    end
+
+    if (rst) begin
+        m_axis_eth_rx_tvalid_reg <= 1'b0;
+        m_axis_eth_rx_tready_int_reg <= 1'b0;
+        temp_m_axis_eth_rx_tvalid_reg <= 1'b0;
     end
 end
 
