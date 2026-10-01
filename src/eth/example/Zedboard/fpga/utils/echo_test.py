@@ -13,10 +13,11 @@
 #   sudo ./echo_test.py enp1s0 -s 1480             # the largest payload
 #   sudo ./echo_test.py enp1s0 -m 3                # three messages per request
 #
-# The stream_id carries this interface's address, so each echo comes back to
-# it from the board's address, alone in its own PDU and otherwise identical to
-# the message sent.  Packet sockets see the outbound copy too, which is why
-# PACKET_OUTGOING is filtered out.
+# The request's stream_id carries this interface's address, so each echo
+# comes back to it, from the board's address and in the board's own stream,
+# alone in its own PDU and otherwise identical to the message sent.  Packet
+# sockets see the outbound copy too, which is why PACKET_OUTGOING is filtered
+# out.
 
 import argparse
 import socket
@@ -31,21 +32,24 @@ ETH_P_ALL = 0x0003
 ETHERTYPE_AVTP = 0x22F0
 MAGIC = b'ZEDECHO0'
 BROADCAST = b'\xff' * 6
-# LOCAL_MAC in fpga_core
+# the LOCAL_MAC register's reset value
 BOARD_MAC = b'\x02\x00\x00\x00\x00\x01'
 MIN_FRAME = 60
 # the largest NTSCF payload a frame holds
 MAX_DATA = 1500 - 12
 # an ABB payload starts after the L2, NTSCF and ABB headers
 PAYLOAD_OFFSET = 14 + 12 + 8
-UNIQUE_ID = 0x0001
+# one stream each way, so UniqueID is 0
+UNIQUE_ID = 0x0000
 
 
 def build(host_mac, board_mac, seq, size, messages):
     """A request holding ABB messages with size-byte payloads, and the echo
     expected for each.  The fields vary with seq so every record field is
     exercised."""
+    # the host talks its stream; the echoes are in the board's
     stream_id = int.from_bytes(host_mac, 'big') << 16 | UNIQUE_ID
+    board_stream_id = int.from_bytes(board_mac, 'big') << 16 | UNIQUE_ID
     sequence_num = seq & 0xff
     msgs = []
     echoes = []
@@ -56,7 +60,7 @@ def build(host_mac, board_mac, seq, size, messages):
         word1 = avtp.abb_word1(evt=n & 0xf, transaction_num=n & 0xff, op=n & 1, read_size=n & 0xfff)
         msg = avtp.abb_message(n & 0x7ff, n & 1, word1, payload)
         msgs.append(msg)
-        pdu = avtp.ntscf_pdu(stream_id, sequence_num, [msg])
+        pdu = avtp.ntscf_pdu(board_stream_id, sequence_num, [msg])
         echoes.append((host_mac + board_mac + struct.pack('!H', ETHERTYPE_AVTP) + pdu).ljust(MIN_FRAME, b'\x00'))
     pdu = avtp.ntscf_pdu(stream_id, sequence_num, msgs)
     frame = BROADCAST + host_mac + struct.pack('!H', ETHERTYPE_AVTP) + pdu
@@ -79,7 +83,7 @@ def main():
     p.add_argument('-q', '--quiet', action='store_true',
                    help='do not print a line per lost echo')
     p.add_argument('-b', '--board-mac', type=lambda x: bytes.fromhex(x.replace(':', '')),
-                   default=BOARD_MAC, help='source address the echoes must carry')
+                   default=BOARD_MAC, help="the board's address: the echoes' source and stream_id")
     args = p.parse_args()
 
     if args.size < len(MAGIC) + 4 or args.messages < 1:

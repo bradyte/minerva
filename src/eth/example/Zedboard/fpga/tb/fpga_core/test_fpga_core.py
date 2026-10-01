@@ -130,8 +130,7 @@ class TB:
         assert rx_pkt.payload[:4] == pkt.payload[:4]
 
 
-# host and board addresses; LOCAL_MAC matches fpga_core and the LOCAL_MAC
-# register's reset value
+# host and board addresses; LOCAL_MAC is the LOCAL_MAC register's reset value
 HOST_MAC = bytes.fromhex('5a5152535455')
 LOCAL_MAC = bytes.fromhex('020000000001')
 BCAST = b'\xff' * 6
@@ -186,8 +185,11 @@ def payload_data(n, seed):
 async def record_echo_test(tb, source, sink):
     tb.log.info("Record echo through minerva")
 
-    # the host puts its own address in stream_id, so the echoes come back to it
-    stream_id = int.from_bytes(HOST_MAC, 'big') << 16 | 0x0001
+    # the host talks its stream, with its own address in stream_id, so the
+    # echoes come back to it; they are in the board's own stream; one stream
+    # each way, so UniqueID is 0
+    stream_id = int.from_bytes(HOST_MAC, 'big') << 16
+    board_stream_id = int.from_bytes(LOCAL_MAC, 'big') << 16
 
     # (frame sent, echoes expected)
     test_frames = []
@@ -209,7 +211,7 @@ async def record_echo_test(tb, source, sink):
             payload = payload_data(item, k + j)
             msg = avtp.abb_message(byte_bus_id, mtv, word1, payload)
             msgs.append(msg)
-            pdu = avtp.ntscf_pdu(stream_id, k, [msg], sv=sv)
+            pdu = avtp.ntscf_pdu(board_stream_id, k, [msg], sv=sv)
             echoes.append(l2_frame(HOST_MAC, LOCAL_MAC, ETHERTYPE_AVTP, pdu).ljust(60, b'\x00'))
         pdu = avtp.ntscf_pdu(stream_id, k, msgs, sv=sv)
         if cut is not None:
@@ -341,6 +343,28 @@ async def registers_test(tb):
     assert await mdio_request(tb, 0x10) == 0xFF23
 
 
+async def local_mac_test(tb, source, sink):
+    tb.log.info("Echo from a changed LOCAL_MAC")
+
+    # the echo follows the LOCAL_MAC register, as its source address and in
+    # its stream_id
+    new_mac = bytes.fromhex('02a1a2a3a4a5')
+    await tb.xfcp_write(XFCP_REGS, REG_LOCAL_MAC_0, new_mac[::-1])
+
+    msg = avtp.abb_message(0x321, 0, avtp.abb_word1(transaction_num=0x5a), payload_data(9, 0))
+    pdu = avtp.ntscf_pdu(int.from_bytes(HOST_MAC, 'big') << 16, 7, [msg])
+    await source.send(GmiiFrame.from_payload(l2_frame(BCAST, HOST_MAC, ETHERTYPE_AVTP, pdu).ljust(60, b'\x00')))
+
+    pdu = avtp.ntscf_pdu(int.from_bytes(new_mac, 'big') << 16, 7, [msg])
+    rx_frame = await with_timeout(sink.recv(), 100, 'us')
+
+    assert rx_frame.get_payload() == l2_frame(HOST_MAC, new_mac, ETHERTYPE_AVTP, pdu).ljust(60, b'\x00')
+    assert rx_frame.check_fcs()
+    assert rx_frame.error is None
+
+    await tb.xfcp_write(XFCP_REGS, REG_LOCAL_MAC_0, LOCAL_MAC[::-1])
+
+
 @cocotb.test()
 async def run_test(dut):
 
@@ -371,6 +395,8 @@ async def run_test(dut):
         assert val == count
 
     await registers_test(tb)
+
+    await local_mac_test(tb, tb.baset_phy.rx, tb.baset_phy.tx)
 
     await RisingEdge(dut.clk)
     await RisingEdge(dut.clk)

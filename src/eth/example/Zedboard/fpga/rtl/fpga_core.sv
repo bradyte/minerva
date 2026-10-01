@@ -15,9 +15,10 @@ Authors:
 /*
  * FPGA core logic
  *
- * Minerva on the ADIN1300 MAC.  Each ABB message received is rebuilt from
- * minerva's record and echoed from LOCAL_MAC to the MacAddress in its
- * stream_id; every other frame is dropped in the parser.
+ * Minerva on the ADIN1300 MAC.  Each ABB message received comes back from
+ * minerva's record, in the board's own stream and from the LOCAL_MAC
+ * register, to the talker of the request's stream; every other frame is
+ * dropped in the parser.
  */
 module fpga_core #
 (
@@ -370,10 +371,18 @@ tx_cpl_null_inst (
 );
 
 // Minerva, with the record echo standing in for the consumer
-localparam logic [47:0] LOCAL_MAC = 48'h02_00_00_00_00_01;
+//
+// The device's MAC address, from the registers, LSB first
+wire [47:0] local_mac = {
+    regs_hwif_out.net.LOCAL_MAC_5.data.value,
+    regs_hwif_out.net.LOCAL_MAC_4.data.value,
+    regs_hwif_out.net.LOCAL_MAC_3.data.value,
+    regs_hwif_out.net.LOCAL_MAC_2.data.value,
+    regs_hwif_out.net.LOCAL_MAC_1.data.value,
+    regs_hwif_out.net.LOCAL_MAC_0.data.value
+};
 
-taxi_axis_if #(.DATA_W(32), .ID_EN(1), .ID_W(4), .DEST_EN(1), .DEST_W(1), .USER_EN(1), .USER_W(1)) axis_eth_rx(), axis_eth_rx_fifo();
-taxi_axis_if #(.DATA_W(32)) axis_eth_tx();
+taxi_axis_if #(.DATA_W(32), .ID_EN(1), .ID_W(4), .DEST_EN(1), .DEST_W(1), .USER_EN(1), .USER_W(1)) axis_eth_rx(), axis_eth_rx_fifo(), axis_eth_tx();
 
 minerva_rx_parse
 minerva_rx_parse_inst (
@@ -428,18 +437,20 @@ record_echo_inst (
     .rst(rst),
 
     .s_axis_eth_rx(axis_eth_rx_fifo),
-    .m_axis_eth_tx(axis_eth_tx)
+    .m_axis_eth_tx(axis_eth_tx),
+
+    .cfg_local_mac(local_mac)
 );
 
-minerva_tx_deparse #(
-    .LOCAL_MAC(LOCAL_MAC)
-)
+minerva_tx_deparse
 minerva_tx_deparse_inst (
     .clk(clk),
     .rst(rst),
 
     .s_axis_eth_tx(axis_eth_tx),
-    .m_axis_mac_tx(axis_mac_tx)
+    .m_axis_mac_tx(axis_mac_tx),
+
+    .cfg_local_mac(local_mac)
 );
 
 // LEDs: PHY found, startup done, a frame received, PHY address
