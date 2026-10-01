@@ -15,8 +15,8 @@ Authors:
 /*
  * Single MDIO transaction on request
  *
- * Turns a held request into one clause 22 read or write.  Driven by the VIO in
- * dig_top.
+ * Turns a request into one clause 22 read or write.  Driven by the MDIO
+ * window in the registers.
  */
 module adin1300_mdio_cmd (
     input  wire logic         clk,
@@ -54,7 +54,7 @@ logic        wr_reg = 1'b0, wr_next;
 logic [15:0] rd_data_reg = '0, rd_data_next;
 logic        cmd_valid_reg = 1'b0, cmd_valid_next;
 
-// req_go is a level held by the VIO, so act on its rising edge only
+// req_go may be held high, so act on its rising edge only
 logic go_d_reg = 1'b0;
 wire  go_pulse = req_go && !go_d_reg;
 

@@ -17,7 +17,7 @@ Authors:
  *
  * Owns the PHY reset, the MDIO master and the interrupt pin.  Initialization
  * holds source 0 of the arbiter; the request port is source 1, left free for
- * whatever drives it - a VIO today, the PS or a register block later.
+ * whatever drives it - the register block's MDIO window today.
  */
 module adin1300_management #
 (
