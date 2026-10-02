@@ -110,6 +110,7 @@ FIFO drops whole frames.
   once, so AVTP starts at lane 0. Every 1722 header and ACF message is a whole
   number of quadlets, so everything below stays aligned: each header starts at
   lane 0 of some word.
+- `flow.md` follows an example frame through these conventions, byte by byte.
 
 ## Receive layers
 
@@ -251,12 +252,14 @@ payload that ends short or long, or an abort at its end, ends the frame with
 ## Versions
 
 Development is on `main`, where every commit builds and passes the benches.
-Each milestone is tagged in git once it passes on hardware.
+Each milestone is tagged in git once it passes on hardware; a documentation
+milestone needs no hardware run.
 
 | Tag | Milestone |
 | :--- | :--- |
 | `minerva-0.1.0` | NTSCF with ABB received as record and payload, validated on the Zedboard with the record echo |
 | `minerva-0.2.0` | NTSCF with ABB sent from a transmit record, registered handshakes both ways, validated on the Zedboard with the record echo |
+| `minerva-0.3.0` | Receive data flow documented at byte and bit level, from the MAC through the parser (`flow.md`) |
 
 ## Verification cases
 
