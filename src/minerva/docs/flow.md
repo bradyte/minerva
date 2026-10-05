@@ -3,7 +3,7 @@
 How a frame's bytes and bits move through minerva, beat by beat. `minerva.md`
 is the contract: the record layout, the checks and what each field means. This
 document follows one example frame, built with `tb/avtp.py`, through
-`minerva_rx_parse`.
+`minerva_rx_parse` to its consumer.
 
 ## Bytes and bits
 
@@ -175,4 +175,122 @@ beat, `shifted` is whole only if that beat has at least 2 valid bytes. Beat 15
 has 2 (`tkeep` = `0011`), so quadlet 11 is whole: `B8`, then the 3 pad bytes. A
 last beat with 1 byte leaves the quadlet a byte short, so the frame ended inside
 it. Nothing is sent if that happens in a header. In a payload, the packet ends
-with `tuser` = 1 (`minerva.md`, Receive states).
+with `tuser` = 1; see Truncated payload below.
+
+## To the consumer
+
+Minerva sends one packet per ABB message: the 4-word record, then the payload.
+The example message becomes a 41-byte packet, 16 bytes of record and 25 of
+payload, in 11 beats.
+
+| Signal | Record beats | Payload beats |
+| :--- | :--- | :--- |
+| `tdata` | a record word, as a value | payload bytes in wire order, first in lane 0 |
+| `tkeep` | `1111` | `1111`; on the last beat `1111 >> pad` |
+| `tlast` | on word 3 if `payload_len` is 0 | on the last payload beat |
+| `tid` | 0, NTSCF with ABB (`FORMAT_ABB`) | the same |
+| `tdest` | 0, AVTP (`ROUTE_AVTP`) | the same |
+| `tuser` | 0 | at `tlast`: 1 = the frame ended inside the payload |
+
+| Beat | Lane 0 | Lane 1 | Lane 2 | Lane 3 | `tdata` | `tkeep` | Holds |
+| :---: | :---: | :---: | :---: | :---: | :--- | :---: | :--- |
+| 0 | `53` | `52` | `51` | `5A` | `0x5A515253` | `1111` | word 0, `stream_id[63:32]` |
+| 1 | `00` | `00` | `55` | `54` | `0x54550000` | `1111` | word 1, `stream_id[31:0]` |
+| 2 | `19` | `28` | `01` | `2A` | `0x2A012819` | `1111` | word 2, `sequence_num` to `payload_len` |
+| 3 | `00` | `00` | `07` | `00` | `0x00070000` | `1111` | word 3, ABB word 1 |
+| 4 | `A0` | `A1` | `A2` | `A3` | `0xA3A2A1A0` | `1111` | payload 0-3 |
+| 5 | `A4` | `A5` | `A6` | `A7` | `0xA7A6A5A4` | `1111` | payload 4-7 |
+| 6 | `A8` | `A9` | `AA` | `AB` | `0xABAAA9A8` | `1111` | payload 8-11 |
+| 7 | `AC` | `AD` | `AE` | `AF` | `0xAFAEADAC` | `1111` | payload 12-15 |
+| 8 | `B0` | `B1` | `B2` | `B3` | `0xB3B2B1B0` | `1111` | payload 16-19 |
+| 9 | `B4` | `B5` | `B6` | `B7` | `0xB7B6B5B4` | `1111` | payload 20-23 |
+| 10 | `B8` | | | | `0x------B8` | `0001` | payload 24, `tlast` |
+
+Lanes 1-3 of beat 10 carry the three pad bytes; `tkeep` marks them invalid.
+
+### Values and bytes
+
+The record and the payload are laid out differently on purpose:
+
+- **Record words are values.** Word 0 is `0x5A515253`, so lane 0 holds `53`,
+  the reverse of the wire order `5A 51 52 53`. A consumer reads a field at
+  its bit position with no byte swap: `payload_len` is word 2 `[10:0]`.
+- **The payload is a byte stream.** `A0` arrived first and sits in lane 0, so
+  the bytes reach memory in the order the talker sent them.
+
+### Where each record bit comes from
+
+A whole quadlet read at input beat `b` lands in a record word as:
+
+| Record bits | Input bits |
+| :--- | :--- |
+| `[31:24]` | beat `b-1` `tdata[23:16]` |
+| `[23:16]` | beat `b-1` `tdata[31:24]` |
+| `[15:8]` | beat `b` `tdata[7:0]` |
+| `[7:0]` | beat `b` `tdata[15:8]` |
+
+| Word | Bits | Field | From | Value |
+| :---: | :--- | :--- | :--- | :--- |
+| 0 | `[31:0]` | `stream_id[63:32]` | quadlet 1, beats 4-5 | `0x5A515253` |
+| 1 | `[31:0]` | `stream_id[31:0]` | quadlet 2, beats 5-6 | `0x54550000` |
+| 2 | `[31:24]` | `sequence_num` | quadlet 0 `[7:0]`: beat 4 `tdata[15:8]` | `0x2A` |
+| 2 | `[23]` | `mtv` | quadlet 3 `[13]`: beat 7 `tdata[5]` | 0 |
+| 2 | `[22:12]` | `byte_bus_id` | quadlet 3 `[10:0]`: `{beat 7 tdata[2:0], beat 7 tdata[15:8]}` | `0x012` |
+| 2 | `[11]` | `sv` | quadlet 0 `[23]`: beat 3 `tdata[31]` | 1 |
+| 2 | `[10:0]` | `payload_len` | `acf_msg_length` x 4 - 8 - `pad`, from quadlet 3 `[24:16]` and `[15:14]` | 36 - 8 - 3 = 25 |
+| 3 | `[31:0]` | ABB word 1 | quadlet 4, beats 7-8 | `0x00070000` |
+
+`payload_len` is the only computed field; every other bit is copied. The
+payload follows the same 2-byte shift: payload beat `j` (packet beat 4 + `j`)
+takes lanes 0-1 from lanes 2-3 of input beat 8 + `j`, and lanes 2-3 from
+lanes 0-1 of input beat 9 + `j`.
+
+### Other cases
+
+| Frame | Packets out |
+| :--- | :--- |
+| One empty ABB message (`acf_msg_length` 2): 34 bytes, padded to 60 | One 16-byte packet: the record alone, `tlast` on word 3, word 2 = `0x2A012800` (`payload_len` 0). The padding is dropped. |
+| The example message, then an empty one with `byte_bus_id` `0x013` and `transaction_num` 8: 70 bytes, `ntscf_data_length` 44 | Two packets: the 41-byte packet above, then 16 bytes with word 2 = `0x2A013800` and word 3 = `0x00080000`. Words 0-1, `sequence_num` and `sv` repeat, since they belong to the PDU. |
+| An ACF message of another type among ABB messages | Nothing for it: it is skipped by its length, and the ABB messages come out unchanged. |
+| A frame that ends inside a header, or fails a check | Nothing for that message. Messages before it in the frame are already out, intact. |
+| A frame that ends inside a payload | A truncated packet, below. |
+
+The last payload beat's `tkeep` follows from `pad`:
+
+| `pad` | 0 | 1 | 2 | 3 |
+| :--- | :---: | :---: | :---: | :---: |
+| Last `tkeep` | `1111` | `0111` | `0011` | `0001` |
+
+### Truncated payload
+
+The example frame cut after 49 bytes ends at input beat 12, which holds only
+`AE`:
+
+| Beat | Lane 0 | Lane 1 | Lane 2 | Lane 3 | `tkeep` | Holds |
+| :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| 0-3 | | | | | `1111` | the record, unchanged: `payload_len` is still 25 |
+| 4 | `A0` | `A1` | `A2` | `A3` | `1111` | payload 0-3 |
+| 5 | `A4` | `A5` | `A6` | `A7` | `1111` | payload 4-7 |
+| 6 | `A8` | `A9` | `AA` | `AB` | `1111` | payload 8-11 |
+| 7 | `AC` | `AD` | `AE` | | `0111` | payload 12-14, `tlast`, `tuser` = 1 |
+
+- The record left before the frame ended, so it still announces the full
+  length. Only `tuser` at `tlast` says the packet is bad. The packet is 31
+  bytes, short of the 16 + 25 the record implies.
+- The last beat is `1111` if the input's last beat held at least 2 bytes
+  (`in_whole`), otherwise `0111`. Bytes after that word in the input's last
+  beat are not sent.
+- On the Zedboard, the `taxi_axis_fifo` in front of `record_echo` has
+  `FRAME_FIFO` and `DROP_BAD_FRAME`, so the echo never sees a truncated packet.
+
+### Flow control
+
+- The consumer can hold `tready` low on any beat. Minerva keeps that beat on
+  the bus, unchanged, until the consumer takes it.
+- Minerva's output passes through taxi's registered output datapath, so the
+  consumer's `tready` never reaches minerva's input in the same cycle.
+- While the output waits, minerva stops taking input. The MAC's RX FIFO holds
+  the frames that arrive meanwhile and drops whole frames once it is full.
+- On the Zedboard, the 2048-byte FIFO in front of `record_echo` passes a
+  packet on only once all of it has arrived, and holds minerva back when full
+  (`DROP_WHEN_FULL` 0).

@@ -17,7 +17,7 @@ above them.
 
 | Minerva | Consumer |
 | :--- | :--- |
-| Strip the L2 header, one VLAN tag | Receive memory: DMA sink, RAM, slot descriptors |
+| Strip the L2 header, one VLAN tag | Storing each packet, and all control logic |
 | Dispatch on ethertype, `subtype`, `acf_msg_type` | Which `stream_id`s are accepted |
 | Walk concatenated ACF messages, skip unknown ones | Responses, addressed to the request's `stream_id` MacAddress |
 | Check lengths, delimit each payload | Per-stream `sequence_num` tracking |
@@ -82,20 +82,9 @@ Dropped from the headers: `subtype`, `version` and `r` (checked or ignored),
 `acf_msg_length` and `pad` (replaced by `payload_len`), and the reserved bits of
 ABB's first quadlet.
 
-### In the consumer's memory
-
-The consumer writes each packet into RAM with `taxi_dma_client_axis_sink` and a
-`taxi_dma_psdpram`, as `cndm_proto_rx` does:
-
-1. The consumer posts a descriptor (`taxi_dma_desc_if`) for each free slot.
-2. The sink writes the packet at the slot: record word `n` at slot + 4n,
-   payload byte `k` at slot + 16 + k.
-3. The sink returns a status: `len`, the descriptor's `tag`, and the packet's
-   `tid`, `tdest` and `tuser`. A status with `tuser` = 1 re-posts the slot; any
-   other is a message to process.
-
-With no slot posted, the sink stops accepting, minerva stalls, and the MAC's RX
-FIFO drops whole frames.
+Minerva's part ends at this stream. Where the consumer keeps each packet and
+what it does with it are the consumer's design. A consumer that holds `tready`
+low stalls minerva, and the MAC's RX FIFO then drops whole frames.
 
 ## Datapath conventions
 
@@ -175,7 +164,7 @@ ethertype sees one realigned word per input word.
 A header state that sees `tlast` returns to `STATE_ETH` with nothing emitted.
 
 - Every structural check resolves at `STATE_ACF`, before any output, so a
-  malformed message never takes a slot. The only failure after output starts
+  malformed message never produces output. The only failure after output starts
   is truncation, and `tuser` marks it.
 - No flush state: messages end on a quadlet boundary, so a valid message never
   ends part way through a realigned word; a frame that does is truncated.
