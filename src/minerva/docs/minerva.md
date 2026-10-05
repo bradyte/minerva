@@ -284,3 +284,33 @@ Transmit:
 
 1. Several messages per PDU on transmit; one per PDU for now.
 2. PTP and L2 switching routes, later.
+3. Metadata beside the payload, as zircon does: adopted 2026-10-05, for 0.4.0.
+   `zircon_ip_rx_ingress` broadcasts each frame to `zircon_ip_rx_parse`, which
+   sends only metadata, and to a packet path that keeps the frame whole. On
+   transmit, `zircon_ip_tx_deparse` builds the header from metadata and
+   `taxi_axis_concat` joins it to the payload. Adopting it renames the record
+   to metadata, lets a router steer each format by its metadata, removes the
+   record's input stall, and reduces `minerva_tx_deparse` to headers. Frames on
+   the wire do not change. Zircon's parse and deparse are benched; its ingress
+   and egress are not, and the join of metadata to packets is not designed
+   upstream. Decisions:
+   1. Unit: decided 2026-10-05, one metadata block per ACF message, as minerva
+      today, and one per PDU for formats with a single payload (AAF and CRF).
+      Zircon's one block per frame was not taken.
+   2. Empty payloads: decided 2026-10-05. Metadata goes for every message, first;
+      a payload packet follows only when `payload_len` > 0, and truncation stays
+      `tuser` on its last beat. Nothing between minerva and the consumer drops a
+      packet from one stream without the other. Metadata carries every ABB
+      header field; a message without a payload is its metadata alone.
+   3. Packet stream: settled by 1, each payload cut out and realigned (minerva
+      today), not the whole frame with offsets (zircon).
+   4. Errors: decided 2026-10-05, the parser does not drop. It determines where
+      each frame goes and flags errors in the metadata; handling them is the
+      consumer's. The MAC still drops frames with Ethernet errors. A malformed
+      AVTP frame gives one flagged metadata block, with the fields parsed so
+      far and no payload. Frames for no handler, such as other ethertypes, take
+      a route the wrapper discards. ACF message types without a handler are
+      skipped by length, as today.
+   5. Byte order: decided 2026-10-05, every metadata field is a value, addresses
+      included (minerva today), since only FPGA logic consumes it. Zircon keeps
+      addresses in wire order.
