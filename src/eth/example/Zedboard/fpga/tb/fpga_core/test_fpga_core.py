@@ -435,6 +435,7 @@ def test_fpga_core(request):
         os.path.join(rtl_dir, "zedboard_regs_pkg.sv"),
         os.path.join(rtl_dir, f"{dut}.sv"),
         os.path.join(rtl_dir, "zedboard_regs.sv"),
+        os.path.join(rtl_dir, "echo_server.sv"),
         os.path.join(rtl_dir, "record_echo.sv"),
         os.path.join(taxi_src_dir, "minerva", "rtl", "minerva_rx_parse.sv"),
         os.path.join(taxi_src_dir, "minerva", "rtl", "minerva_tx_deparse.sv"),

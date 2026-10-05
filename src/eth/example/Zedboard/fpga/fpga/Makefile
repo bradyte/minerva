@@ -20,6 +20,7 @@ SYN_FILES = $(RTL_DIR)/fpga.sv
 SYN_FILES += $(RTL_DIR)/fpga_core.sv
 SYN_FILES += $(RTL_DIR)/zedboard_regs_pkg.sv
 SYN_FILES += $(RTL_DIR)/zedboard_regs.sv
+SYN_FILES += $(RTL_DIR)/echo_server.sv
 SYN_FILES += $(RTL_DIR)/record_echo.sv
 SYN_FILES += $(TAXI_SRC_DIR)/minerva/rtl/minerva_rx_parse.sv
 SYN_FILES += $(TAXI_SRC_DIR)/minerva/rtl/minerva_tx_deparse.sv

@@ -370,7 +370,7 @@ tx_cpl_null_inst (
     .s_axis(axis_tx_cpl)
 );
 
-// Minerva, with the record echo standing in for the consumer
+// Minerva, with the echo server standing in for the consumer
 //
 // The device's MAC address, from the registers, LSB first
 wire [47:0] local_mac = {
@@ -382,7 +382,7 @@ wire [47:0] local_mac = {
     regs_hwif_out.net.LOCAL_MAC_0.data.value
 };
 
-taxi_axis_if #(.DATA_W(32), .ID_EN(1), .ID_W(4), .DEST_EN(1), .DEST_W(1), .USER_EN(1), .USER_W(1)) axis_eth_rx(), axis_eth_rx_fifo(), axis_eth_tx();
+taxi_axis_if #(.DATA_W(32), .ID_EN(1), .ID_W(4), .DEST_EN(1), .DEST_W(1), .USER_EN(1), .USER_W(1)) axis_eth_rx(), axis_eth_tx();
 
 minerva_rx_parse
 minerva_rx_parse_inst (
@@ -393,50 +393,12 @@ minerva_rx_parse_inst (
     .m_axis_eth_rx(axis_eth_rx)
 );
 
-// each message is held until it is complete, and a truncated one, marked by
-// tuser, is dropped
-taxi_axis_fifo #(
-    .DEPTH(2048),
-    .FRAME_FIFO(1),
-    .DROP_BAD_FRAME(1),
-    .DROP_WHEN_FULL(0)
-)
-rx_msg_fifo_inst (
+echo_server
+echo_server_inst (
     .clk(clk),
     .rst(rst),
 
-    /*
-     * AXI4-Stream input (sink)
-     */
-    .s_axis(axis_eth_rx),
-
-    /*
-     * AXI4-Stream output (source)
-     */
-    .m_axis(axis_eth_rx_fifo),
-
-    /*
-     * Pause
-     */
-    .pause_req(1'b0),
-    .pause_ack(),
-
-    /*
-     * Status
-     */
-    .status_depth(),
-    .status_depth_commit(),
-    .status_overflow(),
-    .status_bad_frame(),
-    .status_good_frame()
-);
-
-record_echo
-record_echo_inst (
-    .clk(clk),
-    .rst(rst),
-
-    .s_axis_eth_rx(axis_eth_rx_fifo),
+    .s_axis_eth_rx(axis_eth_rx),
     .m_axis_eth_tx(axis_eth_tx),
 
     .cfg_local_mac(local_mac)

@@ -9,7 +9,7 @@ The structural view of what gets built and why. Hardware facts are in
 three things, and only these:
 
 1. Parse AVTP (IEEE 1722) ABB messages and pass each to its consumer. The
-   consumer, a separate design, owns all control logic; here `record_echo`
+   consumer, a separate design, owns all control logic; here `echo_server`
    stands in for it.
 2. Process PTP.
 3. Switch L2 traffic to a second MAC (far future).
@@ -26,7 +26,8 @@ through `lib/taxi`, so every block can be validated on its own.
 src/eth/example/Zedboard/fpga/
   rtl/fpga.sv            clocks, reset, receive IDELAY, MDIO tristate, UART pins
   rtl/fpga_core.sv       MAC, minerva, PHY management, XFCP, registers
-  rtl/record_echo.sv     test fixture: turns each RX record into a reply TX record
+  rtl/echo_server.sv     test fixture standing in for the consumer: a FIFO, then record_echo
+  rtl/record_echo.sv     turns each RX record into a reply TX record
   rtl/zedboard_regs*.sv  register block, generated from rdl/ by PeakRDL
   rdl/                   zedboard_regs.rdl, the register map
   tb/fpga_core/          whole-core bench from the RGMII pins and the UART
@@ -43,9 +44,8 @@ ADIN1300 ◄─RGMII─► IDELAYE2 (RX, tap 12) ─► taxi_eth_mac_1g_rgmii_fi
                                               ▼                  │
                                       minerva_rx_parse   minerva_tx_deparse
                                               │ m_axis_eth_rx    ▲ s_axis_eth_tx
-                                         message FIFO            │
                                               │                  │
-                                              └──► record_echo ──┘
+                                              └──► echo_server ──┘
                                           (stands in for the consumer)
 
 Host ─UART, Pmod JA─► taxi_xfcp_if_uart ─► taxi_xfcp_switch
