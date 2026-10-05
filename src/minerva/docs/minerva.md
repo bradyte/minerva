@@ -242,13 +242,15 @@ payload that ends short or long, or an abort at its end, ends the frame with
 
 Development is on `main`, where every commit builds and passes the benches.
 Each milestone is tagged in git once it passes on hardware; a documentation
-milestone needs no hardware run.
+milestone needs no hardware run, and an incremental tag (x.y.Z) needs only the
+benches.
 
 | Tag | Milestone |
 | :--- | :--- |
 | `minerva-0.1.0` | NTSCF with ABB received as record and payload, validated on the Zedboard with the record echo |
 | `minerva-0.2.0` | NTSCF with ABB sent from a transmit record, registered handshakes both ways, validated on the Zedboard with the record echo |
 | `minerva-0.3.0` | Receive data flow documented at byte and bit level, from the MAC through the parser (`flow.md`) |
+| `minerva-0.3.1` | Consumer hand-off documented (`flow.md`); the Zedboard stand-in consumer grouped as `echo_server`; benches only |
 
 ## Verification cases
 
