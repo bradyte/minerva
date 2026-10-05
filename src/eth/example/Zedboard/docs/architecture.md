@@ -8,11 +8,13 @@ The structural view of what gets built and why. Hardware facts are in
 1G RGMII endpoint on a Zedboard with an ADI ADIN1300 FMC card. The device does
 three things, and only these:
 
-1. Process AVTP (IEEE 1722) ABB messages, driving an I2C master.
+1. Parse AVTP (IEEE 1722) ABB messages and pass each to its consumer. The
+   consumer, a separate design, owns all control logic; here `record_echo`
+   stands in for it.
 2. Process PTP.
 3. Switch L2 traffic to a second MAC (far future).
 
-Order of work: **Ethernet path → minerva → ABB to I2C → PTP.** A stage
+Order of work: **Ethernet path → minerva → PTP.** A stage
 is done when it works on the board, not only in simulation.
 
 ## Layout
@@ -44,7 +46,7 @@ ADIN1300 ◄─RGMII─► IDELAYE2 (RX, tap 12) ─► taxi_eth_mac_1g_rgmii_fi
                                          message FIFO            │
                                               │                  │
                                               └──► record_echo ──┘
-                                              (I2C consumer later)
+                                          (stands in for the consumer)
 
 Host ─UART, Pmod JA─► taxi_xfcp_if_uart ─► taxi_xfcp_switch
                                              ├─ port 0 ─► taxi_xfcp_mod_stats   MAC statistics
