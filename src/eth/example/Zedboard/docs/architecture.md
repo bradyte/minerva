@@ -26,13 +26,13 @@ through `lib/taxi`, so every block can be validated on its own.
 src/eth/example/Zedboard/fpga/
   rtl/fpga.sv            clocks, reset, receive IDELAY, MDIO tristate, UART pins
   rtl/fpga_core.sv       MAC, minerva, PHY management, XFCP, registers
-  rtl/echo_server.sv     test fixture standing in for the consumer: a FIFO, then record_echo
-  rtl/record_echo.sv     turns each RX record into a reply TX record
+  rtl/echo_server.sv     test fixture standing in for the consumer: stores metadata and payload, then meta_echo
+  rtl/meta_echo.sv       turns each receive metadata block into a reply's transmit metadata
   rtl/zedboard_regs*.sv  register block, generated from rdl/ by PeakRDL
   rdl/                   zedboard_regs.rdl, the register map
   tb/fpga_core/          whole-core bench from the RGMII pins and the UART
   utils/                 echo_test.py, xfcp_regs.py, xfcp_stats.py (host)
-src/minerva/             IEEE 1722 packet processor: minerva_rx_parse, minerva_tx_deparse
+src/minerva/             IEEE 1722 packet processor: minerva_rx_parse, minerva_tx
 src/phy/adin1300/        PHY reset, identification, init table, MDIO access
 ```
 
@@ -42,8 +42,8 @@ src/phy/adin1300/        PHY reset, identification, init table, MDIO access
 ADIN1300 ◄─RGMII─► IDELAYE2 (RX, tap 12) ─► taxi_eth_mac_1g_rgmii_fifo
                                               │ m_axis_rx        ▲ s_axis_tx
                                               ▼                  │
-                                      minerva_rx_parse   minerva_tx_deparse
-                                              │ m_axis_eth_rx    ▲ s_axis_eth_tx
+                                      minerva_rx_parse       minerva_tx
+                                              │ meta, payload    ▲ meta, payload
                                               │                  │
                                               └──► echo_server ──┘
                                           (stands in for the consumer)
@@ -56,6 +56,10 @@ ADIN1300 ◄─MDIO/MDC, RESET_N── adin1300_management ◄── zedboard_re
                                (adin1300_init, _mdio_cmd, _mdio_arb; INT_N in)
 ```
 
+A `taxi_axis_demux` on the metadata's `tdest` sends route 0 to `echo_server`
+and route 1, the discard route, to a `taxi_axis_null_snk`; only route 0 has
+payloads, so the payload goes straight to `echo_server`.
+
 `fpga.sv` holds the MMCM (100 MHz in; `clk_int` 125 MHz and 200 MHz for
 IDELAYCTRL out), the reset synchroniser, the receive IDELAYs and the MDIO
 IOBUF. Everything else is in `fpga_core.sv`.
@@ -67,17 +71,18 @@ side is 32 bits wide: 4 Gb/s of capacity against a 1 Gb/s line.
 ## Stream contracts
 
 Every stream is a 32-bit `taxi_axis_if` with `tkeep`, lane 0 first on the wire.
-Ports are named for the side they face, as in zircon: `mac_` toward the MAC,
-`eth_` toward the protocol sections or the switch.
+Ports are named for the side they face: `mac_` toward the MAC, `meta` and
+`payload` toward the consumer, as in zircon.
 
 | Stream | Carries |
 |---|---|
 | MAC `m_axis_rx` → `s_axis_mac_rx` | Whole frame, destination first, FCS stripped. Bad FCS, framing errors and oversize frames are already dropped by the MAC RX FIFO, so `tuser` is not examined. |
-| `m_axis_eth_rx` | One packet per ACF message: the 4-word record, then the payload from lane 0. `tid` is the format, `tdest` the route, `tuser` a truncated message. |
-| `s_axis_eth_tx` | One packet per message: the 6-word TX record (the RX record with the destination added), then the payload. |
+| `m_axis_meta` | One 6-word metadata block per ACF message, `tdest` the route: 0 the consumer, 1 discard. An error report carries flags and no payload. |
+| `m_axis_payload` | The payload of each message that has one, from lane 0; `tuser` at `tlast` marks it truncated. |
+| `echo_server` → `minerva_tx` | 8-word transmit metadata (the receive layout with the destination added), then the payload when the message has one. |
 | `m_axis_mac_tx` → MAC `s_axis_tx` | Whole frame with `LOCAL_MAC` as source. The MAC pads to 60 bytes and appends the FCS. |
 
-The record layouts are in `src/minerva/docs/minerva.md`. Header fields exist
+The metadata layouts are in `src/minerva/docs/minerva.md`. Header fields exist
 only to route: nothing past minerva receives the L2 header.
 
 Addressing belongs to the consumer. `stream_id[63:16]` is the MAC of the
@@ -90,36 +95,41 @@ goes to the talker of the request's stream and carries the board's own stream,
 
 ### Minerva
 
-The IEEE 1722 packet processor in zircon's shape, one FSM each way, cut to NTSCF
-with ABB and none of zircon's L3/L4, checksums or buffering. Its records and
-checks are in `src/minerva/docs/minerva.md`. Both modules register their
-handshakes with taxi's output datapath, as `taxi_mac_ctrl_rx` does, so every
-port signal leaves a flip-flop.
+The IEEE 1722 packet processor in zircon's shape, cut to NTSCF with ABB and
+none of zircon's L3/L4 or checksums: metadata beside the payload, and two
+metadata slots in each direction. Its metadata and checks are in
+`src/minerva/docs/minerva.md`. Every output is registered, as in
+`taxi_mac_ctrl_rx` and zircon's metadata read-out.
 
 **`minerva_rx_parse`** removes the L2 header, routes by ethertype, then parses
-AVTP, NTSCF, ACF and ABB into a record per message. The ethertype decode is one
+AVTP, NTSCF, ACF and ABB into a metadata block per message, its payload on a
+second stream. The ethertype decode is one
 `always_comb` block, as in `zircon_ip_rx_parse`:
 
 | Ethertype | Result |
 |---|---|
-| 0x8100, 0x88A8 | one VLAN tag, then decode the inner ethertype; a second tag drops |
+| 0x8100, 0x88A8 | one VLAN tag, then decode the inner ethertype; a second tag takes the discard route |
 | 0x22F0 AVTP | pass, route 0 |
-| anything else | drop |
+| anything else | discard route, route 1 |
 
-A frame that ends inside the header drops. The header is 14 or 18 bytes, both
+A malformed NTSCF frame gives a metadata block with error flags, and a frame
+that ends inside a header an `ERR_TRUNC` block. The header is 14 or 18 bytes, both
 two past a word boundary, so holding two bytes back from each word puts the
 payload at lane 0 — the only realignment in the receive path.
 
-**`minerva_tx_deparse`** builds the whole frame from a TX record: the L2 header
-from the record's destination and `cfg_local_mac`, then NTSCF and ABB. The 34
+**`minerva_tx`** builds each frame from transmit metadata and its payload.
+`minerva_tx_deparse` makes the header, the L2 header from the metadata's
+destination and `cfg_local_mac`, then NTSCF and ABB, and a command for the
+payload; `minerva_tx_gate` passes the payload with its pad, stands in for a
+missing one, or drains a dropped one; `taxi_axis_concat` joins them. The 34
 header bytes leave the payload two bytes past a word boundary, the receive
-shift in reverse. A payload that does not match its record ends the frame with
-`tuser` set, so the MAC TX FIFO drops it.
+shift in reverse, which the concat absorbs. Bad metadata gives no frame and its
+payload is drained; a payload that does not match ends the frame with `tuser`
+set, so the MAC TX FIFO drops it.
 
-**Adding a protocol** is one case arm and a route code. A second live route
-brings a `taxi_axis_demux` (`TDEST_ROUTE`) after the parser and a
-`taxi_axis_arb_mux` before the deparser, probably wrapped as `minerva_rx` and
-`minerva_tx` so the route codes and port numbers live in one place. PTP was
+**Adding a protocol** is one case arm and a route code: the demux after the
+parser gets an output for it, and transmit a `taxi_axis_arb_mux` before
+`minerva_tx`. PTP was
 removed from the table until then, so it cannot reach the AVTP consumer.
 
 ## Decisions
@@ -210,9 +220,9 @@ deliberately planted bugs.
 
 | Bench | Covers |
 |---|---|
-| `src/minerva/tb/minerva_rx_parse` | Records and payloads at every pad up to 1480 bytes, concatenated messages, skipped types, truncation; drops for other ethertypes, subtypes and versions, bad lengths, a double tag and runts; untagged, C-tag and S-tag, `VLAN_EN` on and off; idle and backpressure |
-| `src/minerva/tb/minerva_tx_deparse` | Each record built into its frame byte for byte at every pad and 1480 bytes; `cfg_local_mac` changes; drops for an unknown format or route and records that do not match their payload; `tuser` for a short, long or aborted payload; idle and backpressure |
-| `src/minerva/tb/minerva_loopback` | A record through the deparser and the parser comes back unchanged; the wire carries the destination and `cfg_local_mac` |
+| `src/minerva/tb/minerva_rx_parse` | Metadata and payloads at every pad up to 1480 bytes, metadata alone for empty messages, concatenated messages filling both slots, skipped types; error blocks for no messages, bad lengths and truncated headers, `tuser` for a truncated payload; discard blocks for other ethertypes, subtypes and versions, a double tag and runts; untagged, C-tag and S-tag, `VLAN_EN` on and off; idle and backpressure on each output |
+| `src/minerva/tb/minerva_tx` | Each message built into its frame byte for byte at every pad and 1480 bytes, metadata alone into a 34-byte frame; `cfg_local_mac` changes; drop and drain for another format, flags, short and long metadata and `payload_len` over 1480, with the next message still paired; `tuser` for a short, long or aborted payload; idle and backpressure |
+| `src/minerva/tb/minerva_loopback` | Transmit metadata through `minerva_tx` and `minerva_rx_parse` comes back as its first six words, with the same payload; the wire carries the destination and `cfg_local_mac` |
 | `src/phy/adin1300/tb/adin1300_init` | One clean reset edge; ID scan with the PHY at addresses 0, 7, 31 and absent; the Clause 45 `GE_RGMII_CFG` write and the Clause 22 `IRQ_MASK` write, nothing else |
 | `tb/fpga_core` | From the RGMII pins: each ABB message answered in the board's stream at every pad and at full size, a 1522 byte tagged request answered untagged, three messages answered separately, truncated and other frames dropped; over the UART, every register, a reply following a changed `LOCAL_MAC`, MAC statistics in agreement; `INT_N` reaches `PHY_STATUS` |
 
