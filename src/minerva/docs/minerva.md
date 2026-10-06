@@ -270,8 +270,9 @@ header begins; ethertype 0x22F0; `subtype`, `version` 0 and the reserved bits;
 `pad`, `acf_msg_length` and `ntscf_data_length` from `payload_len`; and the pad
 as zeros.
 
-A block of another `format`, with `flags` set, with `payload_len` over 1480, or
-of other than eight words gives no frame, and its payload is drained, so the
+A block of another `format`, with `flags` set, with `payload_len` over 1480
+(1500 less the 12-byte NTSCF and 8-byte ABB headers), or of other than eight
+words gives no frame, and its payload is drained, so the
 messages after it stay paired. A payload that ends short or long, or an abort
 at its end, ends the frame with `tuser` set, so the MAC TX FIFO drops it
 (`TX_DROP_BAD_FRAME`).
