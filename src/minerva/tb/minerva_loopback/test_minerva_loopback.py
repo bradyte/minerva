@@ -36,15 +36,6 @@ except ImportError:
         del sys.path[0]
 
 
-ETHERTYPE_AVTP = 0x22F0
-
-# every byte differs so a misplaced lane shows
-LOCAL_MAC = 0x5A5152535455
-
-# the talker's stream: the local MAC, UniqueID 0
-STREAM_ID = LOCAL_MAC << 16
-
-
 class TB(object):
     def __init__(self, dut):
         self.dut = dut
@@ -64,7 +55,7 @@ class TB(object):
         cocotb.start_soon(check_axis_stable(self.meta_sink.bus, dut.clk, dut.rst))
         cocotb.start_soon(check_axis_stable(self.payload_sink.bus, dut.clk, dut.rst))
 
-        dut.cfg_local_mac.setimmediatevalue(LOCAL_MAC)
+        dut.cfg_local_mac.setimmediatevalue(avtp.LOCAL_MAC)
 
     def set_idle_generator(self, generator=None):
         if generator:
@@ -88,28 +79,15 @@ class TB(object):
         await RisingEdge(self.dut.clk)
 
 
-def payload_data(n, seed):
-    return bytes((seed + k) & 0xff for k in range(n))
-
-
-def last_tuser(frame):
-    return frame.tuser[-1] if isinstance(frame.tuser, list) else frame.tuser
-
-
 def message(k, payload, sv=1):
     """The metadata a producer sends for an ABB message with fields varied by
     k, its destination, and the metadata a consumer must receive for it: the
     same words without the destination."""
     dst = 0x02D1D2D3D400 | (k & 0xff)
     sequence_num = (0xfd + k) & 0xff
-    byte_bus_id = (0x5ff + 0x123 * k) & 0x7ff
-    mtv = k & 1
-    word1 = avtp.abb_word1(evt=k & 0xf, hs=k & 1, cs=(k >> 1) & 1,
-                           transaction_num=(0x40 + k) & 0xff, op=(k >> 2) & 1,
-                           rsp=(k >> 3) & 1, err=(k >> 1) & 1, ms=k & 1,
-                           read_size=(0xbff - k) & 0xfff)
-    tx_meta = avtp.abb_tx_meta(STREAM_ID, sequence_num, byte_bus_id, word1, len(payload), dst, sv=sv, mtv=mtv)
-    rx_meta = avtp.abb_meta(STREAM_ID, sequence_num, byte_bus_id, word1, len(payload), sv=sv, mtv=mtv)
+    byte_bus_id, mtv, word1 = avtp.abb_fields(k)
+    tx_meta = avtp.abb_tx_meta(avtp.STREAM_ID, sequence_num, byte_bus_id, word1, len(payload), dst, sv=sv, mtv=mtv)
+    rx_meta = avtp.abb_meta(avtp.STREAM_ID, sequence_num, byte_bus_id, word1, len(payload), sv=sv, mtv=mtv)
     return tx_meta, dst, rx_meta
 
 
@@ -131,7 +109,7 @@ async def run_test_loopback(dut, idle_inserter=None, backpressure_inserter=None)
     # then a run without payloads
     for n in list(range(9)) + [1480] + [0] * 6:
         k = len(test_msgs)
-        payload = payload_data(n, k)
+        payload = avtp.payload_data(n, k)
         test_msgs.append((*message(k, payload, sv=(k >> 1) & 1), payload))
 
     for tx_meta, _, rx_meta, payload in test_msgs:
@@ -148,10 +126,10 @@ async def run_test_loopback(dut, idle_inserter=None, backpressure_inserter=None)
         wire_frame = await tb.wire.recv()
         wire = bytes(wire_frame.tdata)
 
-        assert not last_tuser(wire_frame)
+        assert not avtp.last_tuser(wire_frame)
         assert wire[0:6] == dst.to_bytes(6, 'big')
-        assert wire[6:12] == LOCAL_MAC.to_bytes(6, 'big')
-        assert wire[12:14] == ETHERTYPE_AVTP.to_bytes(2, 'big')
+        assert wire[6:12] == avtp.LOCAL_MAC.to_bytes(6, 'big')
+        assert wire[12:14] == avtp.ETHERTYPE_AVTP.to_bytes(2, 'big')
 
         # the metadata and payload, back from the wire
         rx_frame = await tb.meta_sink.recv()
@@ -162,7 +140,7 @@ async def run_test_loopback(dut, idle_inserter=None, backpressure_inserter=None)
         if payload:
             rx_frame = await tb.payload_sink.recv()
 
-            assert not last_tuser(rx_frame)
+            assert not avtp.last_tuser(rx_frame)
             assert bytes(rx_frame.tdata) == payload
 
     # nothing else comes back

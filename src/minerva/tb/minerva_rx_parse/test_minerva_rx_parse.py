@@ -40,7 +40,6 @@ except ImportError:
         del sys.path[0]
 
 
-ETHERTYPE_AVTP = 0x22F0
 ETHERTYPE_PTP = 0x88F7
 
 # expected in place of a metadata block on the discard route, whose words
@@ -102,10 +101,6 @@ def eth_pad(frame):
     return frame + bytes(max(0, 60 - len(frame)))
 
 
-def payload_data(n, seed):
-    return bytes((seed + k) & 0xff for k in range(n))
-
-
 def stream(k):
     """A stream_id and sequence_num varied by k."""
     return (0x0200_0000_0000 | (k & 0xff)) << 16 | (0x1000 + k), (0xfd + k) & 0xff
@@ -115,12 +110,7 @@ def abb(k, stream_id, sequence_num, payload=b'', sv=1):
     """An ABB message with fields varied by k, and the output minerva sends
     for it in a PDU with this stream_id, sequence_num and sv: its metadata,
     then its payload if it has one."""
-    byte_bus_id = (0x5ff + 0x123 * k) & 0x7ff
-    mtv = k & 1
-    word1 = avtp.abb_word1(evt=k & 0xf, hs=k & 1, cs=(k >> 1) & 1,
-                           transaction_num=(0x40 + k) & 0xff, op=(k >> 2) & 1,
-                           rsp=(k >> 3) & 1, err=(k >> 1) & 1, ms=k & 1,
-                           read_size=(0xbff - k) & 0xfff)
+    byte_bus_id, mtv, word1 = avtp.abb_fields(k)
     msg = avtp.abb_message(byte_bus_id, mtv, word1, payload)
     meta = avtp.abb_meta(stream_id, sequence_num, byte_bus_id, word1, len(payload), sv=sv, mtv=mtv)
     return msg, out(meta, payload)
@@ -183,7 +173,7 @@ async def run_frames(tb, test_frames):
 
             rx_payload = await tb.payload_sink.recv()
             data = bytes(rx_payload.tdata)
-            tuser = rx_payload.tuser[-1] if isinstance(rx_payload.tuser, list) else rx_payload.tuser
+            tuser = avtp.last_tuser(rx_payload)
 
             assert rx_payload.tdest == avtp.ROUTE_CONSUMER
 
@@ -234,8 +224,8 @@ async def run_test_payload(dut, idle_inserter=None, backpressure_inserter=None):
             k = len(test_frames)
             stream_id, sequence_num = stream(k)
             sv = (k >> 1) & 1
-            msg, output = abb(k, stream_id, sequence_num, payload_data(n, k), sv=sv)
-            frame = l2_frame(ETHERTYPE_AVTP, avtp.ntscf_pdu(stream_id, sequence_num, [msg], sv=sv), vlan)
+            msg, output = abb(k, stream_id, sequence_num, avtp.payload_data(n, k), sv=sv)
+            frame = l2_frame(avtp.ETHERTYPE_AVTP, avtp.ntscf_pdu(stream_id, sequence_num, [msg], sv=sv), vlan)
             if pad:
                 frame = eth_pad(frame)
             test_frames.append((frame, tagged(dut, vlan, [output])))
@@ -283,14 +273,14 @@ async def run_test_concat(dut, idle_inserter=None, backpressure_inserter=None):
             outputs = []
             for j, item in enumerate(case):
                 if item == SKIP:
-                    msgs.append(avtp.acf_message(avtp.ACF_MSG_TYPE_CAN, payload_data(10, j)))
+                    msgs.append(avtp.acf_message(avtp.ACF_MSG_TYPE_CAN, avtp.payload_data(10, j)))
                 elif item == SKIP_1:
                     msgs.append(avtp.acf_message(avtp.ACF_MSG_TYPE_CAN))
                 else:
-                    msg, output = abb(16 * k + j, stream_id, sequence_num, payload_data(item, j))
+                    msg, output = abb(16 * k + j, stream_id, sequence_num, avtp.payload_data(item, j))
                     msgs.append(msg)
                     outputs.append(output)
-            frame = l2_frame(ETHERTYPE_AVTP, avtp.ntscf_pdu(stream_id, sequence_num, msgs), vlan)
+            frame = l2_frame(avtp.ETHERTYPE_AVTP, avtp.ntscf_pdu(stream_id, sequence_num, msgs), vlan)
             if pad:
                 frame = eth_pad(frame)
             test_frames.append((frame, tagged(dut, vlan, outputs)))
@@ -314,7 +304,7 @@ async def run_test_truncate(dut, idle_inserter=None, backpressure_inserter=None)
 
     # frames cut after n bytes of the PDU, without Ethernet padding
     def cut(pdu, n, vlan=None):
-        return l2_frame(ETHERTYPE_AVTP, pdu[:n], vlan)
+        return l2_frame(avtp.ETHERTYPE_AVTP, pdu[:n], vlan)
 
     # one message with a 20-byte payload from PDU byte 20: cut before the
     # first payload beat (bytes 20 and 21 share a beat with ABB quadlet 1),
@@ -323,7 +313,7 @@ async def run_test_truncate(dut, idle_inserter=None, backpressure_inserter=None)
         for n in (21, 22, 23, 24, 26, 29, 30, 33, 37, 39, 40):
             k = len(test_frames)
             stream_id, sequence_num = stream(k)
-            payload = payload_data(20, k)
+            payload = avtp.payload_data(20, k)
             msg, output = abb(k, stream_id, sequence_num, payload)
             pdu = avtp.ntscf_pdu(stream_id, sequence_num, [msg])
             if n <= 22:
@@ -340,8 +330,8 @@ async def run_test_truncate(dut, idle_inserter=None, backpressure_inserter=None)
     for n in (30, 34, 38, 41, 50, 56):
         k = len(test_frames)
         stream_id, sequence_num = stream(k)
-        payload = payload_data(20, k)
-        msg_1, output_1 = abb(k, stream_id, sequence_num, payload_data(8, k))
+        payload = avtp.payload_data(20, k)
+        msg_1, output_1 = abb(k, stream_id, sequence_num, avtp.payload_data(8, k))
         msg_2, output_2 = abb(k + 1, stream_id, sequence_num, payload)
         pdu = avtp.ntscf_pdu(stream_id, sequence_num, [msg_1, msg_2])
         outputs = [output_1]
@@ -355,8 +345,8 @@ async def run_test_truncate(dut, idle_inserter=None, backpressure_inserter=None)
 
     # cut inside a skipped message, before an ABB message
     stream_id, sequence_num = stream(len(test_frames))
-    msg, output = abb(len(test_frames), stream_id, sequence_num, payload_data(4, 0))
-    pdu = avtp.ntscf_pdu(stream_id, sequence_num, [avtp.acf_message(avtp.ACF_MSG_TYPE_CAN, payload_data(10, 0)), msg])
+    msg, output = abb(len(test_frames), stream_id, sequence_num, avtp.payload_data(4, 0))
+    pdu = avtp.ntscf_pdu(stream_id, sequence_num, [avtp.acf_message(avtp.ACF_MSG_TYPE_CAN, avtp.payload_data(10, 0)), msg])
     test_frames.append((cut(pdu, 20), [err(pdu, 20, avtp.FLAG_ERR_TRUNC, msg_q=3)]))
 
     # ntscf_data_length beyond the frame: the complete message still comes
@@ -365,9 +355,9 @@ async def run_test_truncate(dut, idle_inserter=None, backpressure_inserter=None)
     for pad in (False, True):
         k = len(test_frames)
         stream_id, sequence_num = stream(k)
-        msg, output = abb(k, stream_id, sequence_num, payload_data(8, k))
+        msg, output = abb(k, stream_id, sequence_num, avtp.payload_data(8, k))
         pdu = avtp.ntscf_pdu(stream_id, sequence_num, [msg], ntscf_data_length=len(msg) + 16)
-        frame = l2_frame(ETHERTYPE_AVTP, pdu)
+        frame = l2_frame(avtp.ETHERTYPE_AVTP, pdu)
         if pad:
             frame = eth_pad(frame)
             flags = avtp.FLAG_ERR_LEN
@@ -396,7 +386,7 @@ async def run_test_drop(dut, idle_inserter=None, backpressure_inserter=None):
         stream_id, sequence_num = stream(k)
         msg, output = abb(k, stream_id, sequence_num)
         pdu = avtp.ntscf_pdu(stream_id, sequence_num, [msg])
-        test_frames.append((eth_pad(l2_frame(ETHERTYPE_AVTP, pdu)), [output]))
+        test_frames.append((eth_pad(l2_frame(avtp.ETHERTYPE_AVTP, pdu)), [output]))
 
     def discard(frame):
         test_frames.append((frame, [out(DISCARD)]))
@@ -405,7 +395,7 @@ async def run_test_drop(dut, idle_inserter=None, backpressure_inserter=None):
         test_frames.append((frame or avtp_frame(pdu), [err(pdu, len(pdu), flags, msg_q)]))
 
     def avtp_frame(pdu):
-        return eth_pad(l2_frame(ETHERTYPE_AVTP, pdu))
+        return eth_pad(l2_frame(avtp.ETHERTYPE_AVTP, pdu))
 
     stream_id = 0x0200_0000_0001_0001
     msg = avtp.abb_message(byte_bus_id=0x123, word1=avtp.abb_word1(transaction_num=7))
@@ -416,7 +406,7 @@ async def run_test_drop(dut, idle_inserter=None, backpressure_inserter=None):
     discard(eth_pad(l2_frame(0x0800, avtp.ntscf_pdu(stream_id, 1, [msg]))))
     discard(eth_pad(l2_frame(0x0806, avtp.ntscf_pdu(stream_id, 2, [msg]), vlan='c')))
     discard(eth_pad(l2_frame(ETHERTYPE_PTP, avtp.ntscf_pdu(stream_id, 3, [msg]))))
-    discard(eth_pad(bytes(Ether() / Dot1AD(vlan=456) / Dot1Q(vlan=123, type=ETHERTYPE_AVTP) /
+    discard(eth_pad(bytes(Ether() / Dot1AD(vlan=456) / Dot1Q(vlan=123, type=avtp.ETHERTYPE_AVTP) /
         Raw(avtp.ntscf_pdu(stream_id, 4, [msg])))))
 
     good()
@@ -438,7 +428,7 @@ async def run_test_drop(dut, idle_inserter=None, backpressure_inserter=None):
     # another message type with length 0, or past the NTSCF payload
     error(avtp.ntscf_pdu(stream_id, 12, [avtp.acf_message(avtp.ACF_MSG_TYPE_CAN, acf_msg_length=0), msg]),
         avtp.FLAG_ERR_LEN, msg_q=3)
-    error(avtp.ntscf_pdu(stream_id, 13, [avtp.acf_message(avtp.ACF_MSG_TYPE_CAN, payload_data(8, 0), acf_msg_length=5)]),
+    error(avtp.ntscf_pdu(stream_id, 13, [avtp.acf_message(avtp.ACF_MSG_TYPE_CAN, avtp.payload_data(8, 0), acf_msg_length=5)]),
         avtp.FLAG_ERR_LEN, msg_q=3)
 
     # runts: frames ending inside or at the end of each header quadlet, and a
@@ -447,12 +437,12 @@ async def run_test_drop(dut, idle_inserter=None, backpressure_inserter=None):
     pdu = avtp.ntscf_pdu(stream_id, 14, [msg])
     for n in (2, 4, 6, 8, 10, 12, 14, 16, 19):
         if n < 4:
-            discard(l2_frame(ETHERTYPE_AVTP, pdu[:n]))
+            discard(l2_frame(avtp.ETHERTYPE_AVTP, pdu[:n]))
         else:
-            test_frames.append((l2_frame(ETHERTYPE_AVTP, pdu[:n]),
+            test_frames.append((l2_frame(avtp.ETHERTYPE_AVTP, pdu[:n]),
                 [err(pdu, n, avtp.FLAG_ERR_TRUNC, msg_q=3, abb_q1=True)]))
-    discard(l2_frame(ETHERTYPE_AVTP, b'')[:10])
-    discard(l2_frame(ETHERTYPE_AVTP, b'', vlan='c'))
+    discard(l2_frame(avtp.ETHERTYPE_AVTP, b'')[:10])
+    discard(l2_frame(avtp.ETHERTYPE_AVTP, b'', vlan='c'))
 
     good()
 
