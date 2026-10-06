@@ -21,6 +21,7 @@ import cocotb_test.simulator
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer, with_timeout
+from cocotb.regression import TestFactory
 
 from cocotbext.eth import GmiiFrame, RgmiiPhy
 from cocotbext.uart import UartSource, UartSink
@@ -67,6 +68,9 @@ class TB:
 
         self.baset_phy = RgmiiPhy(dut.phy_txd, dut.phy_tx_ctl, dut.phy_tx_clk,
             dut.phy_rxd, dut.phy_rx_ctl, dut.phy_rx_clk, speed=speed)
+
+        # waits for frames stretch as the link slows: 1 at 1G, 10 at 100M
+        self.wire_scale = int(1000e6 // speed)
 
         self.uart_source = UartSource(dut.uart_rxd, baud=921600, bits=8, stop_bits=1)
         self.uart_sink = UartSink(dut.uart_txd, baud=921600, bits=8, stop_bits=1)
@@ -253,7 +257,7 @@ async def echo_server_test(tb, source, sink):
 
     for _, echoes in test_frames:
         for echo in echoes:
-            rx_frame = await with_timeout(sink.recv(), 100, 'us')
+            rx_frame = await with_timeout(sink.recv(), 100 * tb.wire_scale, 'us')
 
             tb.log.info("RX frame: %s", rx_frame)
 
@@ -262,7 +266,7 @@ async def echo_server_test(tb, source, sink):
             assert rx_frame.error is None
 
     # nothing else may come back
-    for k in range(2000):
+    for k in range(2000 * tb.wire_scale):
         await RisingEdge(tb.dut.clk)
 
     assert sink.empty()
@@ -357,7 +361,7 @@ async def local_mac_test(tb, source, sink):
     await source.send(GmiiFrame.from_payload(l2_frame(BCAST, HOST_MAC, ETHERTYPE_AVTP, pdu).ljust(60, b'\x00')))
 
     pdu = avtp.ntscf_pdu(int.from_bytes(new_mac, 'big') << 16, 7, [msg])
-    rx_frame = await with_timeout(sink.recv(), 100, 'us')
+    rx_frame = await with_timeout(sink.recv(), 100 * tb.wire_scale, 'us')
 
     assert rx_frame.get_payload() == l2_frame(HOST_MAC, new_mac, ETHERTYPE_AVTP, pdu).ljust(60, b'\x00')
     assert rx_frame.check_fcs()
@@ -366,12 +370,20 @@ async def local_mac_test(tb, source, sink):
     await tb.xfcp_write(XFCP_REGS, REG_LOCAL_MAC_0, LOCAL_MAC[::-1])
 
 
-@cocotb.test()
-async def run_test(dut):
+async def run_test(dut, speed=1000e6):
 
-    tb = TB(dut)
+    tb = TB(dut, speed)
 
     await tb.init()
+
+    # the MAC infers the link speed from the receive clock
+    for k in range(100):
+        await RisingEdge(dut.phy_rx_clk)
+
+    if speed == 100e6:
+        assert int(dut.eth_mac_inst.link_speed.value) == 1
+    else:
+        assert int(dut.eth_mac_inst.link_speed.value) == 2
 
     rx_count, tx_count = await echo_server_test(tb, tb.baset_phy.rx, tb.baset_phy.tx)
 
@@ -401,6 +413,13 @@ async def run_test(dut):
 
     await RisingEdge(dut.clk)
     await RisingEdge(dut.clk)
+
+
+if getattr(cocotb, 'top', None) is not None:
+
+    factory = TestFactory(run_test)
+    factory.add_option("speed", [1000e6, 100e6])
+    factory.generate_tests()
 
 
 # cocotb-test
