@@ -1,8 +1,8 @@
 # Minerva 0.4.0 release notes
 
-**Draft, 2026-10-05.** This is the planned contract and the transition plan
-from 0.3.x. It is updated as the build lands and final when `minerva-0.4.0` is
-tagged.
+**Draft, 2026-10-06.** The contract and the transition plan from 0.3.x. The
+build passes every bench; the notes are final when the hardware run passes and
+`minerva-0.4.0` is tagged.
 
 ## Summary
 
@@ -23,7 +23,8 @@ metadata block per ABB message. Frames on the wire do not change.
 | `tid` | format code, 0 | unused, 0 |
 | `tdest` | 0 | 0 the consumer, 1 discard |
 | `tuser` at `tlast` | truncated, on the record stream | truncated, on `payload` |
-| Transmit input | 6-word record, then the payload | 8-word metadata, then `payload` only when `payload_len` > 0 |
+| Transmit input | 6-word record, then the payload, into `minerva_tx_deparse` | 8-word metadata, then `payload` only when `payload_len` > 0, into `minerva_tx` |
+| Malformed transmit metadata | dropped | dropped, and its payload drained |
 
 ## What does not change
 
@@ -56,11 +57,12 @@ Six words per ABB message, `tlast` on word 5.
 | :--- | :---: | :--- |
 | `ERR_EMPTY` | 16 | `ntscf_data_length` is 0 |
 | `ERR_LEN` | 17 | `acf_msg_length` is below the header and pad, or runs past the data length |
-| `ERR_TRUNC` | 18 | the frame ends inside a header |
+| `ERR_TRUNC` | 18 | the frame ends before `ntscf_data_length` is used up, except after a payload has started, which ends with `tuser` instead |
 
-A block with any flag set has `payload_len` 0, so no payload follows. Words the
-parser had not reached are 0. Messages earlier in the same frame are delivered
-as usual.
+A block with any flag set has `payload_len` 0, so no payload follows. A field
+is filled only once its whole quadlet has arrived; the rest are 0. Messages
+earlier in the same frame are delivered as usual, so a frame that ends between
+two messages gives the first, then an `ERR_TRUNC` block.
 
 ## Mapping from the 0.3.x record
 
@@ -108,11 +110,20 @@ Minerva still fills in `acf_msg_type`, `acf_msg_length`, `pad` and
 producer aborts a message with `tuser` = 1 at the payload's `tlast`; a message
 without a payload is aborted by not sending it.
 
+Metadata of another `format`, with `flags` set, with `payload_len` over 1480,
+or of other than eight words gives no frame, and its payload, if it announces
+one, is drained, so the messages after it stay paired.
+
+`minerva_tx` replaces `minerva_tx_deparse` as the module to instantiate. Inside
+it, `minerva_tx_deparse` now builds only the header, `minerva_tx_gate` makes
+the payload follow it, and `taxi_axis_concat` joins the two.
+
 ## Migrating a producer
 
-1. Send the eight metadata words, then one `payload` packet only when
+1. Instantiate `minerva_tx` (`minerva_tx.f`) in place of `minerva_tx_deparse`.
+2. Send the eight metadata words, then one `payload` packet only when
    `payload_len` > 0.
-2. Move the fields to their new positions, above.
+3. Move the fields to their new positions, above.
 
 ## Staged migration
 
@@ -122,14 +133,12 @@ appended, and error reports dropped. It is not planned unless needed.
 
 ## Verification
 
-- The `minerva_rx_parse`, `minerva_tx_deparse` and loopback benches cover both
-  streams, the pairing rule, every flag and the discard route.
-- The Zedboard `fpga_core` bench passes with `echo_server` on the new streams.
-- On hardware, `echo_test.py` (`-c 1000`, `-s` 13 to 15 and 1480, `-m 3`)
-  echoes cleanly, and the build meets timing. Then `minerva-0.4.0` is tagged.
-
-## Open items
-
-- Transmit checks: 0.3.x drops a malformed transmit record; whether 0.4.0 keeps
-  that or reports it.
-- Where the discard route is dropped in the Zedboard design.
+- Passed: the `minerva_rx_parse`, `minerva_tx` and loopback benches, covering
+  both streams, the pairing rule, every flag, the discard route, and drop and
+  drain on transmit.
+- Passed: the Zedboard `fpga_core` bench, with `echo_server` on the new streams
+  and the discard route dropped by a `taxi_axis_demux` on `tdest` into a
+  `taxi_axis_null_snk`.
+- To do: on hardware, `echo_test.py` (`-c 1000`, `-s` 13 to 15 and 1480,
+  `-m 3`) echoes cleanly, and the build meets timing. Then `minerva-0.4.0` is
+  tagged.
