@@ -15,18 +15,10 @@ Authors:
 /*
  * Minerva RX parser
  *
- * Parses Ethernet, including one optional VLAN tag, then AVTP, NTSCF, ACF and
- * ABB.  Each ABB message gives a metadata block on m_axis_meta and, when it
- * has a payload, the payload on m_axis_payload.  Other ACF messages are
- * skipped.  A malformed NTSCF frame gives a metadata block with error flags,
- * and a frame for no handler one on the discard route; neither has a payload.
- *
- * Metadata blocks wait in two slots, so the parser carries on while they are
- * read out.  A frame that ends after a payload has started ends that payload
- * with tuser set.
- *
- * Bad frames must already be gone: tuser is not examined, so the MAC's RX
- * FIFO needs DROP_BAD_FRAME.
+ * The mirror of minerva_tx_deparse: it parses each frame from Ethernet down to
+ * its ABB messages, and gives a metadata block for each and, when the message
+ * has a payload, the payload.  A frame that fails its checks gives a block
+ * with error flags, or one on the discard route, and no payload.
  */
 module minerva_rx_parse #
 (
@@ -120,7 +112,6 @@ state_t state_reg = STATE_ETH, state_next;
 
 // words of the L2 header consumed
 logic [1:0] ptr_reg = '0, ptr_next;
-logic [DEST_W-1:0] route_reg = '0, route_next;
 
 // bytes of ACF messages still to come in the NTSCF payload
 logic [10:0] data_rem_reg = '0, data_rem_next;
@@ -129,8 +120,7 @@ logic [8:0] msg_rem_reg = '0, msg_rem_next;
 // pad bytes at the end of the current ABB message
 logic [1:0] pad_reg = '0, pad_next;
 
-// metadata fields, each filled once its whole quadlet has arrived: the
-// frame's are cleared at each frame, the message's after each message
+// metadata fields
 logic [7:0]  format_reg = '0, format_next;
 logic        sv_reg = 1'b0, sv_next;
 logic [7:0]  seq_num_reg = '0, seq_num_next;
@@ -139,8 +129,7 @@ logic [31:0] acf_q0_reg = '0, acf_q0_next;
 logic [31:0] abb_1_reg = '0, abb_1_next;
 logic [10:0] payload_len_reg = '0, payload_len_next;
 
-// the block to load into a slot, and the state to go on to; a frame that ends
-// with a message but before ntscf_data_length does needs ERR_TRUNC next
+// the block to load into a slot, and the state to go on to
 logic [7:0]        meta_flags_reg = '0, meta_flags_next;
 logic [10:0]       meta_len_reg = '0, meta_len_next;
 logic [DEST_W-1:0] meta_route_reg = '0, meta_route_next;
@@ -168,18 +157,13 @@ logic [DEST_W-1:0] meta_req_route;
 state_t            meta_req_ret;
 logic              meta_req_trunc;
 
-// the header is 14 or 18 bytes, both two past a word boundary, so holding two
-// bytes back from each word puts the payload at lane 0
+// realignment: the previous word's top two bytes
 logic [15:0] shift_reg = '0;
 wire [31:0] shifted = {s_axis_mac_rx.tdata[15:0], shift_reg};
 
-// the shifted word as a 1722 quadlet: lane 0 is first on the wire, so it is
-// the most significant byte, and a field at bit offset o of width w is
-// quad[31-o -: w]
+// the shifted word as a 1722 quadlet
 wire [31:0] quad = {shifted[7:0], shifted[15:8], shifted[23:16], shifted[31:24]};
 
-// the ethertype is lanes 0 and 1 of word 3, or of word 4 when a tag is
-// present; lane 0 is first on the wire, so it is the most significant byte
 wire [15:0] ethertype = {s_axis_mac_rx.tdata[7:0], s_axis_mac_rx.tdata[15:8]};
 
 // valid bytes in this input word; tkeep is contiguous from lane 0
@@ -194,8 +178,7 @@ wire in_whole = !s_axis_mac_rx.tlast || in_keep >= 3'd2;
 wire [7:0] avtp_subtype = quad[31:24];
 wire [2:0] avtp_version = quad[22:20];
 
-// ACF common header and the first ABB fields, in ACF word 0; the message
-// length is in quadlets, header included
+// ACF common header and the first ABB fields, in ACF word 0
 wire [6:0]  acf_msg_type = quad[31:25];
 wire [8:0]  acf_msg_len = quad[24:16];
 wire [10:0] acf_msg_bytes = {acf_msg_len, 2'b00};
@@ -210,25 +193,14 @@ wire [10:0] acf_data_rem = data_rem_reg - acf_msg_bytes;
 wire acf_fits = acf_msg_bytes <= data_rem_reg;
 wire acf_abb_ok = acf_fits && acf_msg_bytes >= 11'd8 + 11'(acf_pad);
 
-// handle ethertype: the route table
+// handle ethertype
 state_t eth_type_state;
-logic [DEST_W-1:0] eth_type_route;
 
 always_comb begin
-    eth_type_state = STATE_DROP;
-    eth_type_route = ROUTE_DISCARD;
-
     case (ethertype)
-        ETHERTYPE_VLAN_C, ETHERTYPE_VLAN_S: begin
-            eth_type_state = VLAN_EN ? STATE_VLAN : STATE_DROP;
-        end
-        ETHERTYPE_AVTP: begin
-            eth_type_state = STATE_AVTP;
-            eth_type_route = ROUTE_CONSUMER;
-        end
-        default: begin
-            eth_type_state = STATE_DROP;
-        end
+        ETHERTYPE_VLAN_C, ETHERTYPE_VLAN_S: eth_type_state = VLAN_EN ? STATE_VLAN : STATE_DROP;
+        ETHERTYPE_AVTP: eth_type_state = STATE_AVTP;
+        default: eth_type_state = STATE_DROP;
     endcase
 end
 
@@ -240,7 +212,6 @@ logic [3:0]        m_axis_payload_tkeep_int;
 logic              m_axis_payload_tvalid_int;
 logic              m_axis_payload_tready_int_reg = 1'b0;
 logic              m_axis_payload_tlast_int;
-logic [DEST_W-1:0] m_axis_payload_tdest_int;
 logic [USER_W-1:0] m_axis_payload_tuser_int;
 wire               m_axis_payload_tready_int_early;
 
@@ -250,7 +221,6 @@ always_comb begin
     state_next = state_reg;
 
     ptr_next = ptr_reg;
-    route_next = route_reg;
     data_rem_next = data_rem_reg;
     msg_rem_next = msg_rem_reg;
     pad_next = pad_reg;
@@ -277,7 +247,7 @@ always_comb begin
     meta_req = 1'b0;
     meta_req_flags = '0;
     meta_req_len = '0;
-    meta_req_route = route_reg;
+    meta_req_route = ROUTE_CONSUMER;
     meta_req_ret = STATE_ETH;
     meta_req_trunc = 1'b0;
 
@@ -287,7 +257,6 @@ always_comb begin
     m_axis_payload_tkeep_int = 4'b1111;
     m_axis_payload_tvalid_int = 1'b0;
     m_axis_payload_tlast_int = 1'b0;
-    m_axis_payload_tdest_int = route_reg;
     m_axis_payload_tuser_int = '0;
 
     case (state_reg)
@@ -314,8 +283,6 @@ always_comb begin
                     meta_req = 1'b1;
                     meta_req_route = ROUTE_DISCARD;
                 end else if (ptr_reg == 2'd3) begin
-                    route_next = eth_type_route;
-
                     if (eth_type_state == STATE_DROP) begin
                         meta_req = 1'b1;
                         meta_req_route = ROUTE_DISCARD;
@@ -327,13 +294,10 @@ always_comb begin
             end
         end
         STATE_VLAN: begin
-            // the tag control information went by at word 3, so the inner
-            // ethertype sits where the outer one did
+            // the inner ethertype, in the lanes the outer one used
             s_axis_mac_rx_tready_next = 1'b1;
 
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
-                route_next = eth_type_route;
-
                 if (s_axis_mac_rx.tlast || eth_type_state != STATE_AVTP) begin
                     // too short, a second tag, or another ethertype
                     meta_req = 1'b1;
@@ -345,8 +309,7 @@ always_comb begin
             end
         end
         STATE_AVTP: begin
-            // AVTP common header and the first NTSCF fields; only version 0
-            // NTSCF is parsed
+            // AVTP common header and the first NTSCF fields
             s_axis_mac_rx_tready_next = 1'b1;
 
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
@@ -409,8 +372,7 @@ always_comb begin
             end
         end
         STATE_ACF: begin
-            // ACF common header and the first ABB fields; every length check
-            // resolves here, before anything is sent
+            // ACF common header and the first ABB fields
             s_axis_mac_rx_tready_next = 1'b1;
 
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
@@ -509,8 +471,7 @@ always_comb begin
             end
         end
         STATE_PAYLOAD: begin
-            // one shifted word out per word in, as fast as the output takes
-            // them; the payload stays in wire order
+            // one shifted word out per word in
             s_axis_mac_rx_tready_next = m_axis_payload_tready_int_early;
 
             m_axis_payload_tdata_int = shifted;
@@ -634,7 +595,6 @@ always_ff @(posedge clk) begin
     state_reg <= state_next;
 
     ptr_reg <= ptr_next;
-    route_reg <= route_next;
     data_rem_reg <= data_rem_next;
     msg_rem_reg <= msg_rem_next;
     pad_reg <= pad_next;
@@ -684,7 +644,6 @@ always_ff @(posedge clk) begin
     if (rst) begin
         state_reg <= STATE_ETH;
         ptr_reg <= '0;
-        route_reg <= '0;
         meta_trunc_reg <= 1'b0;
         meta_wr_slot_reg <= '0;
         meta_rd_slot_reg <= '0;
@@ -700,14 +659,12 @@ logic [31:0]       m_axis_payload_tdata_reg  = '0;
 logic [3:0]        m_axis_payload_tkeep_reg  = '0;
 logic              m_axis_payload_tvalid_reg = 1'b0, m_axis_payload_tvalid_next;
 logic              m_axis_payload_tlast_reg  = 1'b0;
-logic [DEST_W-1:0] m_axis_payload_tdest_reg  = '0;
 logic [USER_W-1:0] m_axis_payload_tuser_reg  = '0;
 
 logic [31:0]       temp_m_axis_payload_tdata_reg  = '0;
 logic [3:0]        temp_m_axis_payload_tkeep_reg  = '0;
 logic              temp_m_axis_payload_tvalid_reg = 1'b0, temp_m_axis_payload_tvalid_next;
 logic              temp_m_axis_payload_tlast_reg  = 1'b0;
-logic [DEST_W-1:0] temp_m_axis_payload_tdest_reg  = '0;
 logic [USER_W-1:0] temp_m_axis_payload_tuser_reg  = '0;
 
 // datapath control
@@ -721,7 +678,7 @@ assign m_axis_payload.tstrb  = m_axis_payload.tkeep;
 assign m_axis_payload.tvalid = m_axis_payload_tvalid_reg;
 assign m_axis_payload.tlast  = m_axis_payload_tlast_reg;
 assign m_axis_payload.tid    = '0;
-assign m_axis_payload.tdest  = m_axis_payload_tdest_reg;
+assign m_axis_payload.tdest  = ROUTE_CONSUMER;
 assign m_axis_payload.tuser  = m_axis_payload_tuser_reg;
 
 // enable ready input next cycle if output is ready or the temp reg will not be filled on the next cycle (output reg empty or no input)
@@ -765,13 +722,11 @@ always_ff @(posedge clk) begin
         m_axis_payload_tdata_reg <= m_axis_payload_tdata_int;
         m_axis_payload_tkeep_reg <= m_axis_payload_tkeep_int;
         m_axis_payload_tlast_reg <= m_axis_payload_tlast_int;
-        m_axis_payload_tdest_reg <= m_axis_payload_tdest_int;
         m_axis_payload_tuser_reg <= m_axis_payload_tuser_int;
     end else if (store_axis_temp_to_output) begin
         m_axis_payload_tdata_reg <= temp_m_axis_payload_tdata_reg;
         m_axis_payload_tkeep_reg <= temp_m_axis_payload_tkeep_reg;
         m_axis_payload_tlast_reg <= temp_m_axis_payload_tlast_reg;
-        m_axis_payload_tdest_reg <= temp_m_axis_payload_tdest_reg;
         m_axis_payload_tuser_reg <= temp_m_axis_payload_tuser_reg;
     end
 
@@ -779,7 +734,6 @@ always_ff @(posedge clk) begin
         temp_m_axis_payload_tdata_reg <= m_axis_payload_tdata_int;
         temp_m_axis_payload_tkeep_reg <= m_axis_payload_tkeep_int;
         temp_m_axis_payload_tlast_reg <= m_axis_payload_tlast_int;
-        temp_m_axis_payload_tdest_reg <= m_axis_payload_tdest_int;
         temp_m_axis_payload_tuser_reg <= m_axis_payload_tuser_int;
     end
 
