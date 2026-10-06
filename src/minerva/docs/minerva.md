@@ -314,3 +314,32 @@ Transmit:
    5. Byte order: decided 2026-10-05, every metadata field is a value, addresses
       included (minerva today), since only FPGA logic consumes it. Zircon keeps
       addresses in wire order.
+
+### Metadata layout for 0.4.0
+
+Decided 2026-10-05. 32-bit words, every field a value. Common words come
+first and extras are appended, so every ACF unit (NTSCF or TSCF, ABB or GBB)
+shares words 0 to 5.
+
+| Word | Fields |
+| :---: | :--- |
+| 0 | `format[31:24]`, the AVTP `subtype` as received; `flags[23:16]`; `payload_len[15:0]` |
+| 1 | `stream_id[63:32]` |
+| 2 | `stream_id[31:0]` |
+| 3 | `sv[31]`, `sequence_num[30:23]`, `mr[22]`, `tv[21]`, `tu[20]`, `fs[19]`; a field the format lacks is 0 |
+| 4 | ACF message quadlet 0 as received; ABB and GBB share its layout |
+| 5 | ABB quadlet 1, or GBB quadlet 3, which has the same layout |
+| 6... | extras: TSCF `avtp_timestamp`, then GBB `message_timestamp` (2 words) |
+
+Flags: bit 0 `ERR_EMPTY`, `ntscf_data_length` is 0; bit 1 `ERR_LEN`,
+`acf_msg_length` is below the header and pad or runs past the data length; bit
+2 `ERR_TRUNC`, the frame ends inside a header. Other bits are 0.
+
+`tid` is unused (0), `tdest` is the route (0 the consumer, 1 discard), and
+`tuser` at `tlast` of a payload marks it truncated. NTSCF and TSCF go to the
+consumer, which reads the layout from `format` and `acf_msg_type`; AAF and CRF
+take the discard route for now. Transmit takes the same words with the
+destination MAC appended. The streams are `meta` and `payload`, and "record"
+becomes "meta". 0.4.0 builds NTSCF with ABB only; TSCF, GBB, AAF and CRF
+shaped the layout and stay deferred. The transition from 0.3.x is in
+`minerva_0_4_0_release_notes.md`.
