@@ -15,13 +15,12 @@ Authors:
 /*
  * Minerva loopback testbench
  *
- * minerva_tx_deparse into minerva_rx_parse, so a record goes to the wire and
- * back.
+ * minerva_tx into minerva_rx_parse, so metadata and a payload go to the wire
+ * and back.
  */
 module test_minerva_loopback #
 (
     /* verilator lint_off WIDTHTRUNC */
-    parameter ID_W = 4,
     parameter DEST_W = 1
     /* verilator lint_on WIDTHTRUNC */
 )
@@ -30,21 +29,24 @@ module test_minerva_loopback #
 logic clk;
 logic rst;
 
-taxi_axis_if #(.DATA_W(32), .ID_EN(1), .ID_W(ID_W), .DEST_EN(1), .DEST_W(DEST_W), .USER_EN(1), .USER_W(1)) s_axis_eth_tx();
+taxi_axis_if #(.DATA_W(32)) s_axis_meta();
+taxi_axis_if #(.DATA_W(32), .USER_EN(1), .USER_W(1)) s_axis_payload();
 taxi_axis_if #(.DATA_W(32), .USER_EN(1), .USER_W(1)) axis_wire();
-taxi_axis_if #(.DATA_W(32), .ID_EN(1), .ID_W(ID_W), .DEST_EN(1), .DEST_W(DEST_W), .USER_EN(1), .USER_W(1)) m_axis_eth_rx();
+taxi_axis_if #(.DATA_W(32), .DEST_EN(1), .DEST_W(DEST_W)) m_axis_meta();
+taxi_axis_if #(.DATA_W(32), .DEST_EN(1), .DEST_W(DEST_W), .USER_EN(1), .USER_W(1)) m_axis_payload();
 
 logic [47:0] cfg_local_mac;
 
-minerva_tx_deparse
-tx_deparse_inst (
+minerva_tx
+tx_inst (
     .clk(clk),
     .rst(rst),
 
     /*
-     * Message input: record, then payload
+     * Metadata and payload input
      */
-    .s_axis_eth_tx(s_axis_eth_tx),
+    .s_axis_meta(s_axis_meta),
+    .s_axis_payload(s_axis_payload),
 
     /*
      * Frame output
@@ -68,9 +70,10 @@ rx_parse_inst (
     .s_axis_mac_rx(axis_wire),
 
     /*
-     * Message output: record, then payload
+     * Metadata and payload output
      */
-    .m_axis_eth_rx(m_axis_eth_rx)
+    .m_axis_meta(m_axis_meta),
+    .m_axis_payload(m_axis_payload)
 );
 
 endmodule

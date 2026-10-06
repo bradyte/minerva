@@ -13,34 +13,33 @@ Authors:
 `default_nettype none
 
 /*
- * Minerva TX deparser testbench
+ * Minerva TX testbench
  */
-module test_minerva_tx_deparse #
-(
-    /* verilator lint_off WIDTHTRUNC */
-    parameter ID_W = 4,
-    parameter DEST_W = 1
-    /* verilator lint_on WIDTHTRUNC */
-)
-();
+module test_minerva_tx ();
 
 logic clk;
 logic rst;
 
-taxi_axis_if #(.DATA_W(32), .ID_EN(1), .ID_W(ID_W), .DEST_EN(1), .DEST_W(DEST_W), .USER_EN(1), .USER_W(1)) s_axis_eth_tx();
+taxi_axis_if #(.DATA_W(32)) s_axis_meta();
+taxi_axis_if #(.DATA_W(32), .USER_EN(1), .USER_W(1)) s_axis_payload();
 taxi_axis_if #(.DATA_W(32), .USER_EN(1), .USER_W(1)) m_axis_mac_tx();
 
 logic [47:0] cfg_local_mac;
 
-minerva_tx_deparse
+minerva_tx
 uut (
     .clk(clk),
     .rst(rst),
 
     /*
-     * Message input: record, then payload
+     * Metadata input, one block per message
      */
-    .s_axis_eth_tx(s_axis_eth_tx),
+    .s_axis_meta(s_axis_meta),
+
+    /*
+     * Payload input, when the metadata announces one
+     */
+    .s_axis_payload(s_axis_payload),
 
     /*
      * Frame output, to the MAC

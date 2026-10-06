@@ -31,9 +31,9 @@ VERILOG_SOURCES += $(RTL_DIR)/zedboard_regs_pkg.sv
 VERILOG_SOURCES += $(RTL_DIR)/$(DUT).sv
 VERILOG_SOURCES += $(RTL_DIR)/zedboard_regs.sv
 VERILOG_SOURCES += $(RTL_DIR)/echo_server.sv
-VERILOG_SOURCES += $(RTL_DIR)/record_echo.sv
+VERILOG_SOURCES += $(RTL_DIR)/meta_echo.sv
 VERILOG_SOURCES += $(TAXI_SRC_DIR)/minerva/rtl/minerva_rx_parse.sv
-VERILOG_SOURCES += $(TAXI_SRC_DIR)/minerva/rtl/minerva_tx_deparse.sv
+VERILOG_SOURCES += $(TAXI_SRC_DIR)/minerva/rtl/minerva_tx.f
 VERILOG_SOURCES += $(TAXI_SRC_DIR)/eth/rtl/taxi_eth_mac_1g_rgmii_fifo.f
 VERILOG_SOURCES += $(TAXI_SRC_DIR)/xfcp/rtl/taxi_xfcp_if_uart.f
 VERILOG_SOURCES += $(TAXI_SRC_DIR)/xfcp/rtl/taxi_xfcp_switch.sv
@@ -42,6 +42,7 @@ VERILOG_SOURCES += $(TAXI_SRC_DIR)/xfcp/rtl/taxi_xfcp_mod_apb.f
 VERILOG_SOURCES += $(TAXI_SRC_DIR)/phy/adin1300/rtl/adin1300_management.f
 VERILOG_SOURCES += $(TAXI_SRC_DIR)/axis/rtl/taxi_axis_fifo.sv
 VERILOG_SOURCES += $(TAXI_SRC_DIR)/axis/rtl/taxi_axis_null_snk.sv
+VERILOG_SOURCES += $(TAXI_SRC_DIR)/axis/rtl/taxi_axis_demux.sv
 VERILOG_SOURCES += $(TAXI_SRC_DIR)/sync/rtl/taxi_sync_signal.sv
 
 # handle file list files

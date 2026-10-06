@@ -34,7 +34,6 @@ VERILOG_SOURCES := $(call uniq_base,$(call process_f_files,$(VERILOG_SOURCES)))
 
 # module parameters
 export PARAM_VLAN_EN := 1
-export PARAM_ID_W := 4
 export PARAM_DEST_W := 1
 
 ifeq ($(SIM), icarus)

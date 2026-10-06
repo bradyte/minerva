@@ -182,8 +182,8 @@ def payload_data(n, seed):
     return bytes((seed + k) & 0xff for k in range(n))
 
 
-async def record_echo_test(tb, source, sink):
-    tb.log.info("Record echo through minerva")
+async def echo_server_test(tb, source, sink):
+    tb.log.info("Echo through minerva and the echo server")
 
     # the host talks its stream, with its own address in stream_id, so the
     # echoes come back to it; they are in the board's own stream; one stream
@@ -197,7 +197,7 @@ async def record_echo_test(tb, source, sink):
     def request(items, vlan=None, sv=1, cut=None):
         """A frame from the host holding these messages: an ABB message given
         by its payload length, or any other ACF message as bytes.  Each ABB
-        message comes back alone in its own PDU, rebuilt from the record."""
+        message comes back alone in its own PDU, rebuilt from its metadata."""
         k = len(test_frames)
         msgs = []
         echoes = []
@@ -223,7 +223,7 @@ async def record_echo_test(tb, source, sink):
     def drop(ethertype):
         test_frames.append((l2_frame(BCAST, HOST_MAC, ethertype, payload_data(46, len(test_frames))), []))
 
-    # a record alone, then every pad
+    # metadata alone, then every pad
     request([0])
     request([1])
     drop(0x88B5)
@@ -242,8 +242,9 @@ async def record_echo_test(tb, source, sink):
     request([5, 0, 12])
     request([2, avtp.acf_message(avtp.ACF_MSG_TYPE_CAN, payload_data(10, 0)), 7])
 
-    # a frame ending inside a payload: minerva marks the packet with tuser and
-    # the message FIFO drops it; the message before it still comes back
+    # a frame ending inside a payload: minerva marks the payload with tuser,
+    # minerva_tx marks the echo bad, and the MAC TX FIFO drops it; the message
+    # before it still comes back
     request([8, 100], cut=12 + 16 + 8 + 60)
     request([6])
 
@@ -372,7 +373,7 @@ async def run_test(dut):
 
     await tb.init()
 
-    rx_count, tx_count = await record_echo_test(tb, tb.baset_phy.rx, tb.baset_phy.tx)
+    rx_count, tx_count = await echo_server_test(tb, tb.baset_phy.rx, tb.baset_phy.tx)
 
     # INT_N reaches PHY_STATUS through adin1300_management, active high
     assert not (await tb.xfcp_read(XFCP_REGS, REG_PHY_STATUS, 1))[0] & PHY_STATUS_IRQ
@@ -436,9 +437,9 @@ def test_fpga_core(request):
         os.path.join(rtl_dir, f"{dut}.sv"),
         os.path.join(rtl_dir, "zedboard_regs.sv"),
         os.path.join(rtl_dir, "echo_server.sv"),
-        os.path.join(rtl_dir, "record_echo.sv"),
+        os.path.join(rtl_dir, "meta_echo.sv"),
         os.path.join(taxi_src_dir, "minerva", "rtl", "minerva_rx_parse.sv"),
-        os.path.join(taxi_src_dir, "minerva", "rtl", "minerva_tx_deparse.sv"),
+        os.path.join(taxi_src_dir, "minerva", "rtl", "minerva_tx.f"),
         os.path.join(taxi_src_dir, "eth", "rtl", "taxi_eth_mac_1g_rgmii_fifo.f"),
         os.path.join(taxi_src_dir, "xfcp", "rtl", "taxi_xfcp_if_uart.f"),
         os.path.join(taxi_src_dir, "xfcp", "rtl", "taxi_xfcp_switch.sv"),
@@ -447,6 +448,7 @@ def test_fpga_core(request):
         os.path.join(taxi_src_dir, "phy", "adin1300", "rtl", "adin1300_management.f"),
         os.path.join(taxi_src_dir, "axis", "rtl", "taxi_axis_fifo.sv"),
         os.path.join(taxi_src_dir, "axis", "rtl", "taxi_axis_null_snk.sv"),
+        os.path.join(taxi_src_dir, "axis", "rtl", "taxi_axis_demux.sv"),
         os.path.join(taxi_src_dir, "sync", "rtl", "taxi_sync_signal.sv"),
     ]
 

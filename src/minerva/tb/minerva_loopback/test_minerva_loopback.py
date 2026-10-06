@@ -38,9 +38,6 @@ except ImportError:
 
 ETHERTYPE_AVTP = 0x22F0
 
-# demux port for AVTP, as in the RTL route table
-ROUTE_AVTP = 0
-
 # every byte differs so a misplaced lane shows
 LOCAL_MAC = 0x5A5152535455
 
@@ -57,22 +54,27 @@ class TB(object):
 
         cocotb.start_soon(Clock(dut.clk, 8, units="ns").start())
 
-        self.source = AxiStreamSource(AxiStreamBus.from_entity(dut.s_axis_eth_tx), dut.clk, dut.rst)
+        self.meta_source = AxiStreamSource(AxiStreamBus.from_entity(dut.s_axis_meta), dut.clk, dut.rst)
+        self.payload_source = AxiStreamSource(AxiStreamBus.from_entity(dut.s_axis_payload), dut.clk, dut.rst)
         self.wire = AxiStreamMonitor(AxiStreamBus.from_entity(dut.axis_wire), dut.clk, dut.rst)
-        self.sink = AxiStreamSink(AxiStreamBus.from_entity(dut.m_axis_eth_rx), dut.clk, dut.rst)
+        self.meta_sink = AxiStreamSink(AxiStreamBus.from_entity(dut.m_axis_meta), dut.clk, dut.rst)
+        self.payload_sink = AxiStreamSink(AxiStreamBus.from_entity(dut.m_axis_payload), dut.clk, dut.rst)
 
         cocotb.start_soon(check_axis_stable(self.wire.bus, dut.clk, dut.rst))
-        cocotb.start_soon(check_axis_stable(self.sink.bus, dut.clk, dut.rst))
+        cocotb.start_soon(check_axis_stable(self.meta_sink.bus, dut.clk, dut.rst))
+        cocotb.start_soon(check_axis_stable(self.payload_sink.bus, dut.clk, dut.rst))
 
         dut.cfg_local_mac.setimmediatevalue(LOCAL_MAC)
 
     def set_idle_generator(self, generator=None):
         if generator:
-            self.source.set_pause_generator(generator())
+            self.meta_source.set_pause_generator(generator())
+            self.payload_source.set_pause_generator(generator())
 
     def set_backpressure_generator(self, generator=None):
         if generator:
-            self.sink.set_pause_generator(generator())
+            self.meta_sink.set_pause_generator(generator())
+            self.payload_sink.set_pause_generator(generator())
 
     async def reset(self):
         self.dut.rst.setimmediatevalue(0)
@@ -95,9 +97,9 @@ def last_tuser(frame):
 
 
 def message(k, payload, sv=1):
-    """The packet a producer sends for an ABB message with fields varied by k,
-    its destination, and the packet a consumer must receive for it: the same
-    record without the destination words, and the same payload."""
+    """The metadata a producer sends for an ABB message with fields varied by
+    k, its destination, and the metadata a consumer must receive for it: the
+    same words without the destination."""
     dst = 0x02D1D2D3D400 | (k & 0xff)
     sequence_num = (0xfd + k) & 0xff
     byte_bus_id = (0x5ff + 0x123 * k) & 0x7ff
@@ -106,15 +108,15 @@ def message(k, payload, sv=1):
                            transaction_num=(0x40 + k) & 0xff, op=(k >> 2) & 1,
                            rsp=(k >> 3) & 1, err=(k >> 1) & 1, ms=k & 1,
                            read_size=(0xbff - k) & 0xfff)
-    tx_pkt = avtp.abb_tx_packet(STREAM_ID, sequence_num, byte_bus_id, word1, payload, dst, sv=sv, mtv=mtv)
-    rx_pkt = avtp.abb_packet(STREAM_ID, sequence_num, byte_bus_id, word1, payload, sv=sv, mtv=mtv)
-    return tx_pkt, dst, rx_pkt
+    tx_meta = avtp.abb_tx_meta(STREAM_ID, sequence_num, byte_bus_id, word1, len(payload), dst, sv=sv, mtv=mtv)
+    rx_meta = avtp.abb_meta(STREAM_ID, sequence_num, byte_bus_id, word1, len(payload), sv=sv, mtv=mtv)
+    return tx_meta, dst, rx_meta
 
 
 async def run_test_loopback(dut, idle_inserter=None, backpressure_inserter=None):
-    """A record sent to the wire comes back unchanged: the consumer gets the
-    producer's record without its destination words, and the same payload,
-    while the wire carries the destination and the local MAC."""
+    """Metadata and a payload sent to the wire come back unchanged: the
+    consumer gets the producer's words without the destination, and the same
+    payload, while the wire carries the destination and the local MAC."""
 
     tb = TB(dut)
 
@@ -125,15 +127,23 @@ async def run_test_loopback(dut, idle_inserter=None, backpressure_inserter=None)
 
     test_msgs = []
 
-    # every pad twice over, sv both ways, and the largest payload a frame holds
-    for n in list(range(9)) + [1480]:
+    # every pad twice over, sv both ways, the largest payload a frame holds,
+    # then a run without payloads
+    for n in list(range(9)) + [1480] + [0] * 6:
         k = len(test_msgs)
-        test_msgs.append(message(k, payload_data(n, k), sv=(k >> 1) & 1))
+        payload = payload_data(n, k)
+        test_msgs.append((*message(k, payload, sv=(k >> 1) & 1), payload))
 
-    for tx_pkt, _, _ in test_msgs:
-        await tb.source.send(AxiStreamFrame(tx_pkt, tid=avtp.FORMAT_ABB, tdest=ROUTE_AVTP, tuser=0))
+    for tx_meta, _, rx_meta, payload in test_msgs:
+        # the transmit layout is the receive layout with the destination
+        # appended
+        assert tx_meta[:24] == rx_meta
 
-    for _, dst, rx_pkt in test_msgs:
+        await tb.meta_source.send(AxiStreamFrame(tx_meta))
+        if payload:
+            await tb.payload_source.send(AxiStreamFrame(payload, tuser=0))
+
+    for _, dst, rx_meta, payload in test_msgs:
         # the header only the wire sees: minerva_rx_parse strips it
         wire_frame = await tb.wire.recv()
         wire = bytes(wire_frame.tdata)
@@ -143,21 +153,27 @@ async def run_test_loopback(dut, idle_inserter=None, backpressure_inserter=None)
         assert wire[6:12] == LOCAL_MAC.to_bytes(6, 'big')
         assert wire[12:14] == ETHERTYPE_AVTP.to_bytes(2, 'big')
 
-        # the record and payload, back from the wire
-        rx_frame = await tb.sink.recv()
+        # the metadata and payload, back from the wire
+        rx_frame = await tb.meta_sink.recv()
 
-        assert not last_tuser(rx_frame)
-        assert rx_frame.tid == avtp.FORMAT_ABB
-        assert rx_frame.tdest == ROUTE_AVTP
-        assert bytes(rx_frame.tdata) == rx_pkt
+        assert rx_frame.tdest == avtp.ROUTE_CONSUMER
+        assert bytes(rx_frame.tdata) == rx_meta
+
+        if payload:
+            rx_frame = await tb.payload_sink.recv()
+
+            assert not last_tuser(rx_frame)
+            assert bytes(rx_frame.tdata) == payload
 
     # nothing else comes back
-    await tb.source.wait()
+    await tb.meta_source.wait()
+    await tb.payload_source.wait()
     for k in range(20):
         await RisingEdge(dut.clk)
 
     assert tb.wire.empty()
-    assert tb.sink.empty()
+    assert tb.meta_sink.empty()
+    assert tb.payload_sink.empty()
 
 
 def cycle_pause():
@@ -201,7 +217,7 @@ def test_minerva_loopback(request):
 
     verilog_sources = [
         os.path.join(tests_dir, f"{toplevel}.sv"),
-        os.path.join(rtl_dir, "minerva_tx_deparse.sv"),
+        os.path.join(rtl_dir, "minerva_tx.f"),
         os.path.join(rtl_dir, "minerva_rx_parse.sv"),
         os.path.join(taxi_src_dir, "axis", "rtl", "taxi_axis_if.sv"),
     ]
@@ -210,7 +226,6 @@ def test_minerva_loopback(request):
 
     parameters = {}
 
-    parameters['ID_W'] = 4
     parameters['DEST_W'] = 1
 
     extra_env = {f'PARAM_{k}': str(v) for k, v in parameters.items()}

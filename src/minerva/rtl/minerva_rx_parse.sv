@@ -16,13 +16,14 @@ Authors:
  * Minerva RX parser
  *
  * Parses Ethernet, including one optional VLAN tag, then AVTP, NTSCF, ACF and
- * ABB, and emits one packet per ABB message: a four-word record of header
- * values, then the payload.  The format code goes out on tid and the route on
- * tdest.  Other ACF messages are skipped, and frames it cannot parse are
- * dropped.
+ * ABB.  Each ABB message gives a metadata block on m_axis_meta and, when it
+ * has a payload, the payload on m_axis_payload.  Other ACF messages are
+ * skipped.  A malformed NTSCF frame gives a metadata block with error flags,
+ * and a frame for no handler one on the discard route; neither has a payload.
  *
- * A frame that ends inside a payload ends that packet with tuser set.  One
- * that ends anywhere else before a message is complete gives nothing for it.
+ * Metadata blocks wait in two slots, so the parser carries on while they are
+ * read out.  A frame that ends after a payload has started ends that payload
+ * with tuser set.
  *
  * Bad frames must already be gone: tuser is not examined, so the MAC's RX
  * FIFO needs DROP_BAD_FRAME.
@@ -42,34 +43,41 @@ module minerva_rx_parse #
     taxi_axis_if.snk   s_axis_mac_rx,
 
     /*
-     * Message output: record, then payload
+     * Metadata output, one block per message
      */
-    taxi_axis_if.src   m_axis_eth_rx
+    taxi_axis_if.src   m_axis_meta,
+
+    /*
+     * Payload output, when the metadata announces one
+     */
+    taxi_axis_if.src   m_axis_payload
 );
 
 localparam DATA_W = s_axis_mac_rx.DATA_W;
-localparam ID_W = m_axis_eth_rx.ID_W;
-localparam DEST_W = m_axis_eth_rx.DEST_W;
-localparam USER_W = m_axis_eth_rx.USER_W;
+localparam DEST_W = m_axis_meta.DEST_W;
+localparam USER_W = m_axis_payload.USER_W;
 
 // check configuration
 if (DATA_W != 32)
     $fatal(0, "Error: Interface width must be 32 (instance %m)");
 
-if (m_axis_eth_rx.DATA_W != DATA_W)
+if (m_axis_meta.DATA_W != DATA_W || m_axis_payload.DATA_W != DATA_W)
     $fatal(0, "Error: Interface DATA_W parameter mismatch (instance %m)");
 
-if (!s_axis_mac_rx.KEEP_EN || !m_axis_eth_rx.KEEP_EN)
+if (!s_axis_mac_rx.KEEP_EN || !m_axis_payload.KEEP_EN)
     $fatal(0, "Error: Interfaces require KEEP_EN (instance %m)");
 
-if (!m_axis_eth_rx.ID_EN)
-    $fatal(0, "Error: Output requires ID_EN (instance %m)");
+if (!m_axis_meta.LAST_EN)
+    $fatal(0, "Error: Metadata output requires LAST_EN (instance %m)");
 
-if (!m_axis_eth_rx.DEST_EN)
-    $fatal(0, "Error: Output requires DEST_EN (instance %m)");
+if (!m_axis_meta.DEST_EN || !m_axis_payload.DEST_EN)
+    $fatal(0, "Error: Outputs require DEST_EN (instance %m)");
 
-if (!m_axis_eth_rx.USER_EN)
-    $fatal(0, "Error: Output requires USER_EN (instance %m)");
+if (m_axis_payload.DEST_W != DEST_W)
+    $fatal(0, "Error: Interface DEST_W parameter mismatch (instance %m)");
+
+if (!m_axis_payload.USER_EN)
+    $fatal(0, "Error: Payload output requires USER_EN (instance %m)");
 
 typedef enum logic [15:0] {
     ETHERTYPE_AVTP = 16'h22F0,
@@ -85,11 +93,14 @@ typedef enum logic [6:0] {
     ACF_MSG_TYPE_ABB = 7'h0E
 } acf_msg_type_t;
 
-// demux port for each routed ethertype
-localparam logic [DEST_W-1:0] ROUTE_AVTP = DEST_W'(0);
+// routes on tdest
+localparam logic [DEST_W-1:0] ROUTE_CONSUMER = DEST_W'(0);
+localparam logic [DEST_W-1:0] ROUTE_DISCARD = DEST_W'(1);
 
-// format code for each record layout
-localparam logic [ID_W-1:0] FORMAT_ABB = ID_W'(0);
+// flags in metadata word 0
+localparam logic [7:0] FLAG_ERR_EMPTY = 8'h01;
+localparam logic [7:0] FLAG_ERR_LEN = 8'h02;
+localparam logic [7:0] FLAG_ERR_TRUNC = 8'h04;
 
 typedef enum logic [3:0] {
     STATE_ETH,
@@ -99,7 +110,7 @@ typedef enum logic [3:0] {
     STATE_NTSCF_2,
     STATE_ACF,
     STATE_ABB_1,
-    STATE_RECORD,
+    STATE_META,
     STATE_PAYLOAD,
     STATE_SKIP,
     STATE_DROP
@@ -107,7 +118,7 @@ typedef enum logic [3:0] {
 
 state_t state_reg = STATE_ETH, state_next;
 
-// words of the L2 header consumed, then the record word being sent
+// words of the L2 header consumed
 logic [1:0] ptr_reg = '0, ptr_next;
 logic [DEST_W-1:0] route_reg = '0, route_next;
 
@@ -117,17 +128,45 @@ logic [10:0] data_rem_reg = '0, data_rem_next;
 logic [8:0] msg_rem_reg = '0, msg_rem_next;
 // pad bytes at the end of the current ABB message
 logic [1:0] pad_reg = '0, pad_next;
-// the frame ended with the message, so there is nothing left to drop
-logic frame_end_reg = 1'b0, frame_end_next;
 
-// record fields
-logic [63:0] stream_id_reg = '0, stream_id_next;
-logic [7:0]  seq_num_reg = '0, seq_num_next;
+// metadata fields, each filled once its whole quadlet has arrived: the
+// frame's are cleared at each frame, the message's after each message
+logic [7:0]  format_reg = '0, format_next;
 logic        sv_reg = 1'b0, sv_next;
-logic        mtv_reg = 1'b0, mtv_next;
-logic [10:0] byte_bus_id_reg = '0, byte_bus_id_next;
-logic [10:0] payload_len_reg = '0, payload_len_next;
+logic [7:0]  seq_num_reg = '0, seq_num_next;
+logic [63:0] stream_id_reg = '0, stream_id_next;
+logic [31:0] acf_q0_reg = '0, acf_q0_next;
 logic [31:0] abb_1_reg = '0, abb_1_next;
+logic [10:0] payload_len_reg = '0, payload_len_next;
+
+// the block to load into a slot, and the state to go on to; a frame that ends
+// with a message but before ntscf_data_length does needs ERR_TRUNC next
+logic [7:0]        meta_flags_reg = '0, meta_flags_next;
+logic [10:0]       meta_len_reg = '0, meta_len_next;
+logic [DEST_W-1:0] meta_route_reg = '0, meta_route_next;
+state_t            meta_ret_reg = STATE_ETH, meta_ret_next;
+logic              meta_trunc_reg = 1'b0, meta_trunc_next;
+
+// two metadata slots, filled by the parser and read out in turn
+logic [31:0]       meta_slot_reg[2][6] = '{default: '{default: '0}};
+logic [DEST_W-1:0] meta_slot_dest_reg[2] = '{default: '0};
+
+logic [1:0] meta_wr_slot_reg = '0, meta_wr_slot_next;
+logic [1:0] meta_rd_slot_reg = '0, meta_rd_slot_next;
+logic [2:0] meta_rd_ptr_reg = '0, meta_rd_ptr_next;
+logic meta_wr;
+logic meta_rd;
+
+wire meta_empty = meta_wr_slot_reg == meta_rd_slot_reg;
+wire meta_full = meta_wr_slot_reg == (meta_rd_slot_reg ^ 2'b10);
+
+// a metadata block requested by this cycle's transfer
+logic              meta_req;
+logic [7:0]        meta_req_flags;
+logic [10:0]       meta_req_len;
+logic [DEST_W-1:0] meta_req_route;
+state_t            meta_req_ret;
+logic              meta_req_trunc;
 
 // the header is 14 or 18 bytes, both two past a word boundary, so holding two
 // bytes back from each word puts the payload at lane 0
@@ -177,7 +216,7 @@ logic [DEST_W-1:0] eth_type_route;
 
 always_comb begin
     eth_type_state = STATE_DROP;
-    eth_type_route = ROUTE_AVTP;
+    eth_type_route = ROUTE_DISCARD;
 
     case (ethertype)
         ETHERTYPE_VLAN_C, ETHERTYPE_VLAN_S: begin
@@ -185,7 +224,7 @@ always_comb begin
         end
         ETHERTYPE_AVTP: begin
             eth_type_state = STATE_AVTP;
-            eth_type_route = ROUTE_AVTP;
+            eth_type_route = ROUTE_CONSUMER;
         end
         default: begin
             eth_type_state = STATE_DROP;
@@ -193,30 +232,17 @@ always_comb begin
     endcase
 end
 
-// record words, sent in order
-logic [31:0] record_word;
-
-always_comb begin
-    case (ptr_reg)
-        2'd0: record_word = stream_id_reg[63:32];
-        2'd1: record_word = stream_id_reg[31:0];
-        2'd2: record_word = {seq_num_reg, mtv_reg, byte_bus_id_reg, sv_reg, payload_len_reg};
-        default: record_word = abb_1_reg;
-    endcase
-end
-
 logic s_axis_mac_rx_tready_reg = 1'b0, s_axis_mac_rx_tready_next;
 
 // internal datapath
-logic [31:0]       m_axis_eth_rx_tdata_int;
-logic [3:0]        m_axis_eth_rx_tkeep_int;
-logic              m_axis_eth_rx_tvalid_int;
-logic              m_axis_eth_rx_tready_int_reg = 1'b0;
-logic              m_axis_eth_rx_tlast_int;
-logic [ID_W-1:0]   m_axis_eth_rx_tid_int;
-logic [DEST_W-1:0] m_axis_eth_rx_tdest_int;
-logic [USER_W-1:0] m_axis_eth_rx_tuser_int;
-wire               m_axis_eth_rx_tready_int_early;
+logic [31:0]       m_axis_payload_tdata_int;
+logic [3:0]        m_axis_payload_tkeep_int;
+logic              m_axis_payload_tvalid_int;
+logic              m_axis_payload_tready_int_reg = 1'b0;
+logic              m_axis_payload_tlast_int;
+logic [DEST_W-1:0] m_axis_payload_tdest_int;
+logic [USER_W-1:0] m_axis_payload_tuser_int;
+wire               m_axis_payload_tready_int_early;
 
 assign s_axis_mac_rx.tready = s_axis_mac_rx_tready_reg;
 
@@ -228,25 +254,41 @@ always_comb begin
     data_rem_next = data_rem_reg;
     msg_rem_next = msg_rem_reg;
     pad_next = pad_reg;
-    frame_end_next = frame_end_reg;
 
-    stream_id_next = stream_id_reg;
-    seq_num_next = seq_num_reg;
+    format_next = format_reg;
     sv_next = sv_reg;
-    mtv_next = mtv_reg;
-    byte_bus_id_next = byte_bus_id_reg;
-    payload_len_next = payload_len_reg;
+    seq_num_next = seq_num_reg;
+    stream_id_next = stream_id_reg;
+    acf_q0_next = acf_q0_reg;
     abb_1_next = abb_1_reg;
+    payload_len_next = payload_len_reg;
+
+    meta_flags_next = meta_flags_reg;
+    meta_len_next = meta_len_reg;
+    meta_route_next = meta_route_reg;
+    meta_ret_next = meta_ret_reg;
+    meta_trunc_next = meta_trunc_reg;
+
+    meta_wr_slot_next = meta_wr_slot_reg;
+    meta_wr = 1'b0;
+
+    // by default a request is an error report to the consumer, then back to
+    // the start of a frame
+    meta_req = 1'b0;
+    meta_req_flags = '0;
+    meta_req_len = '0;
+    meta_req_route = route_reg;
+    meta_req_ret = STATE_ETH;
+    meta_req_trunc = 1'b0;
 
     s_axis_mac_rx_tready_next = 1'b0;
 
-    m_axis_eth_rx_tdata_int = record_word;
-    m_axis_eth_rx_tkeep_int = 4'b1111;
-    m_axis_eth_rx_tvalid_int = 1'b0;
-    m_axis_eth_rx_tlast_int = 1'b0;
-    m_axis_eth_rx_tid_int = FORMAT_ABB;
-    m_axis_eth_rx_tdest_int = route_reg;
-    m_axis_eth_rx_tuser_int = '0;
+    m_axis_payload_tdata_int = shifted;
+    m_axis_payload_tkeep_int = 4'b1111;
+    m_axis_payload_tvalid_int = 1'b0;
+    m_axis_payload_tlast_int = 1'b0;
+    m_axis_payload_tdest_int = route_reg;
+    m_axis_payload_tuser_int = '0;
 
     case (state_reg)
         STATE_ETH: begin
@@ -256,12 +298,31 @@ always_comb begin
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
                 ptr_next = ptr_reg + 1;
 
+                if (ptr_reg == 2'd0) begin
+                    // a new frame
+                    format_next = '0;
+                    sv_next = 1'b0;
+                    seq_num_next = '0;
+                    stream_id_next = '0;
+                    acf_q0_next = '0;
+                    abb_1_next = '0;
+                end
+
                 if (s_axis_mac_rx.tlast) begin
+                    // too short to be anything
                     ptr_next = '0;
-                    state_next = STATE_ETH;
+                    meta_req = 1'b1;
+                    meta_req_route = ROUTE_DISCARD;
                 end else if (ptr_reg == 2'd3) begin
                     route_next = eth_type_route;
-                    state_next = eth_type_state;
+
+                    if (eth_type_state == STATE_DROP) begin
+                        meta_req = 1'b1;
+                        meta_req_route = ROUTE_DISCARD;
+                        meta_req_ret = STATE_DROP;
+                    end else begin
+                        state_next = eth_type_state;
+                    end
                 end
             end
         end
@@ -271,13 +332,15 @@ always_comb begin
             s_axis_mac_rx_tready_next = 1'b1;
 
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
-                if (s_axis_mac_rx.tlast) begin
-                    ptr_next = '0;
-                    state_next = STATE_ETH;
+                route_next = eth_type_route;
+
+                if (s_axis_mac_rx.tlast || eth_type_state != STATE_AVTP) begin
+                    // too short, a second tag, or another ethertype
+                    meta_req = 1'b1;
+                    meta_req_route = ROUTE_DISCARD;
+                    meta_req_ret = s_axis_mac_rx.tlast ? STATE_ETH : STATE_DROP;
                 end else begin
-                    // one tag only, so a second one is dropped
-                    route_next = eth_type_route;
-                    state_next = eth_type_state == STATE_VLAN ? STATE_DROP : eth_type_state;
+                    state_next = STATE_AVTP;
                 end
             end
         end
@@ -287,17 +350,24 @@ always_comb begin
             s_axis_mac_rx_tready_next = 1'b1;
 
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
-                sv_next = quad[23];
                 data_rem_next = quad[18:8];
-                seq_num_next = quad[7:0];
 
-                if (s_axis_mac_rx.tlast) begin
-                    ptr_next = '0;
-                    state_next = STATE_ETH;
-                end else if (avtp_subtype == SUBTYPE_NTSCF && avtp_version == 3'd0) begin
-                    state_next = STATE_NTSCF_1;
+                if (in_whole) begin
+                    format_next = avtp_subtype;
+                    sv_next = quad[23];
+                    seq_num_next = quad[7:0];
+                end
+
+                if (!in_whole || avtp_subtype != SUBTYPE_NTSCF || avtp_version != 3'd0) begin
+                    // not NTSCF, or not known to be
+                    meta_req = 1'b1;
+                    meta_req_route = ROUTE_DISCARD;
+                    meta_req_ret = s_axis_mac_rx.tlast ? STATE_ETH : STATE_DROP;
+                end else if (s_axis_mac_rx.tlast) begin
+                    meta_req = 1'b1;
+                    meta_req_flags = FLAG_ERR_TRUNC;
                 end else begin
-                    state_next = STATE_DROP;
+                    state_next = STATE_NTSCF_1;
                 end
             end
         end
@@ -305,11 +375,13 @@ always_comb begin
             s_axis_mac_rx_tready_next = 1'b1;
 
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
-                stream_id_next[63:32] = quad;
+                if (in_whole) begin
+                    stream_id_next[63:32] = quad;
+                end
 
                 if (s_axis_mac_rx.tlast) begin
-                    ptr_next = '0;
-                    state_next = STATE_ETH;
+                    meta_req = 1'b1;
+                    meta_req_flags = FLAG_ERR_TRUNC;
                 end else begin
                     state_next = STATE_NTSCF_2;
                 end
@@ -319,14 +391,18 @@ always_comb begin
             s_axis_mac_rx_tready_next = 1'b1;
 
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
-                stream_id_next[31:0] = quad;
+                if (in_whole) begin
+                    stream_id_next[31:0] = quad;
+                end
 
-                if (s_axis_mac_rx.tlast) begin
-                    ptr_next = '0;
-                    state_next = STATE_ETH;
-                end else if (data_rem_reg == 0) begin
+                if (in_whole && data_rem_reg == 0) begin
                     // no ACF messages
-                    state_next = STATE_DROP;
+                    meta_req = 1'b1;
+                    meta_req_flags = FLAG_ERR_EMPTY;
+                    meta_req_ret = s_axis_mac_rx.tlast ? STATE_ETH : STATE_DROP;
+                end else if (s_axis_mac_rx.tlast) begin
+                    meta_req = 1'b1;
+                    meta_req_flags = FLAG_ERR_TRUNC;
                 end else begin
                     state_next = STATE_ACF;
                 end
@@ -338,103 +414,134 @@ always_comb begin
             s_axis_mac_rx_tready_next = 1'b1;
 
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
-                mtv_next = quad[13];
-                byte_bus_id_next = quad[10:0];
+                acf_q0_next = in_whole ? quad : '0;
+                abb_1_next = '0;
                 payload_len_next = acf_payload_len;
                 pad_next = acf_pad;
                 msg_rem_next = acf_msg_len - 9'd1;
                 data_rem_next = acf_data_rem;
 
-                if (s_axis_mac_rx.tlast) begin
-                    ptr_next = '0;
-                    state_next = STATE_ETH;
+                if (!in_whole) begin
+                    meta_req = 1'b1;
+                    meta_req_flags = FLAG_ERR_TRUNC;
                 end else if (acf_msg_type == ACF_MSG_TYPE_ABB) begin
-                    state_next = acf_abb_ok ? STATE_ABB_1 : STATE_DROP;
-                end else if (acf_msg_len != 0 && acf_fits) begin
-                    // any other message is skipped by its length; one that is
-                    // only this quadlet is already done
-                    if (acf_msg_len != 9'd1) begin
-                        state_next = STATE_SKIP;
+                    if (!acf_abb_ok) begin
+                        meta_req = 1'b1;
+                        meta_req_flags = FLAG_ERR_LEN;
+                        meta_req_ret = s_axis_mac_rx.tlast ? STATE_ETH : STATE_DROP;
+                    end else if (s_axis_mac_rx.tlast) begin
+                        meta_req = 1'b1;
+                        meta_req_flags = FLAG_ERR_TRUNC;
                     end else begin
-                        state_next = acf_data_rem != 0 ? STATE_ACF : STATE_DROP;
+                        state_next = STATE_ABB_1;
+                    end
+                end else if (acf_msg_len == 0 || !acf_fits) begin
+                    meta_req = 1'b1;
+                    meta_req_flags = FLAG_ERR_LEN;
+                    meta_req_ret = s_axis_mac_rx.tlast ? STATE_ETH : STATE_DROP;
+                end else if (acf_msg_len != 9'd1) begin
+                    // any other message is skipped by its length
+                    if (s_axis_mac_rx.tlast) begin
+                        meta_req = 1'b1;
+                        meta_req_flags = FLAG_ERR_TRUNC;
+                    end else begin
+                        state_next = STATE_SKIP;
                     end
                 end else begin
-                    state_next = STATE_DROP;
+                    // one that is only this quadlet is already done
+                    acf_q0_next = '0;
+
+                    if (acf_data_rem == 0) begin
+                        state_next = s_axis_mac_rx.tlast ? STATE_ETH : STATE_DROP;
+                    end else if (s_axis_mac_rx.tlast) begin
+                        meta_req = 1'b1;
+                        meta_req_flags = FLAG_ERR_TRUNC;
+                    end else begin
+                        state_next = STATE_ACF;
+                    end
                 end
             end
         end
         STATE_ABB_1: begin
-            // the second ABB quadlet is record word 3 as it stands
+            // the second ABB quadlet is metadata word 5 as it stands
             s_axis_mac_rx_tready_next = 1'b1;
 
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
-                abb_1_next = quad;
-                ptr_next = '0;
+                abb_1_next = in_whole ? quad : '0;
                 msg_rem_next = msg_rem_reg - 1;
-                frame_end_next = s_axis_mac_rx.tlast;
+
+                meta_req = 1'b1;
 
                 if (s_axis_mac_rx.tlast && (!in_whole || msg_rem_reg != 9'd1)) begin
-                    // the frame ended inside this quadlet or before the
-                    // payload, so nothing is sent
-                    state_next = STATE_ETH;
+                    // the frame ended before the payload started
+                    meta_req_flags = FLAG_ERR_TRUNC;
                 end else begin
-                    // the input waits while the record goes out
-                    s_axis_mac_rx_tready_next = 1'b0;
-                    state_next = STATE_RECORD;
+                    meta_req_len = payload_len_reg;
+
+                    if (msg_rem_reg != 9'd1) begin
+                        meta_req_ret = STATE_PAYLOAD;
+                    end else if (s_axis_mac_rx.tlast) begin
+                        meta_req_trunc = data_rem_reg != 0;
+                    end else begin
+                        meta_req_ret = data_rem_reg != 0 ? STATE_ACF : STATE_DROP;
+                    end
                 end
             end
         end
-        STATE_RECORD: begin
-            // the record goes out while the input waits
-            if (m_axis_eth_rx_tready_int_reg) begin
-                m_axis_eth_rx_tvalid_int = 1'b1;
-                m_axis_eth_rx_tlast_int = ptr_reg == 2'd3 && msg_rem_reg == 0;
-                ptr_next = ptr_reg + 1;
+        STATE_META: begin
+            // the block goes into a slot while the input waits
+            if (!meta_full) begin
+                meta_wr = 1'b1;
+                meta_wr_slot_next = meta_wr_slot_reg + 1;
+                acf_q0_next = '0;
+                abb_1_next = '0;
 
-                if (ptr_reg == 2'd3) begin
-                    ptr_next = '0;
-
-                    if (msg_rem_reg != 0) begin
-                        s_axis_mac_rx_tready_next = m_axis_eth_rx_tready_int_early;
-                        state_next = STATE_PAYLOAD;
-                    end else if (frame_end_reg) begin
-                        s_axis_mac_rx_tready_next = 1'b1;
-                        state_next = STATE_ETH;
-                    end else begin
-                        s_axis_mac_rx_tready_next = 1'b1;
-                        state_next = data_rem_reg != 0 ? STATE_ACF : STATE_DROP;
-                    end
+                if (meta_trunc_reg) begin
+                    // the frame ended with a message, before
+                    // ntscf_data_length did
+                    meta_flags_next = FLAG_ERR_TRUNC;
+                    meta_len_next = '0;
+                    meta_trunc_next = 1'b0;
+                end else begin
+                    s_axis_mac_rx_tready_next = meta_ret_reg == STATE_PAYLOAD ? m_axis_payload_tready_int_early : 1'b1;
+                    state_next = meta_ret_reg;
                 end
             end
         end
         STATE_PAYLOAD: begin
             // one shifted word out per word in, as fast as the output takes
             // them; the payload stays in wire order
-            s_axis_mac_rx_tready_next = m_axis_eth_rx_tready_int_early;
+            s_axis_mac_rx_tready_next = m_axis_payload_tready_int_early;
 
-            m_axis_eth_rx_tdata_int = shifted;
-            m_axis_eth_rx_tvalid_int = s_axis_mac_rx.tvalid && s_axis_mac_rx.tready;
+            m_axis_payload_tdata_int = shifted;
+            m_axis_payload_tvalid_int = s_axis_mac_rx.tvalid && s_axis_mac_rx.tready;
 
             if (msg_rem_reg == 9'd1) begin
                 // the last quadlet, less its pad
-                m_axis_eth_rx_tkeep_int = 4'b1111 >> pad_reg;
-                m_axis_eth_rx_tlast_int = 1'b1;
+                m_axis_payload_tkeep_int = 4'b1111 >> pad_reg;
+                m_axis_payload_tlast_int = 1'b1;
             end
 
             if (s_axis_mac_rx.tlast && (msg_rem_reg != 9'd1 || !in_whole)) begin
-                // the frame ended before the message did; send what arrived
-                m_axis_eth_rx_tkeep_int = in_whole ? 4'b1111 : 4'b0111;
-                m_axis_eth_rx_tlast_int = 1'b1;
-                m_axis_eth_rx_tuser_int = USER_W'(1);
+                // the frame ended before the payload did; send what arrived
+                m_axis_payload_tkeep_int = in_whole ? 4'b1111 : 4'b0111;
+                m_axis_payload_tlast_int = 1'b1;
+                m_axis_payload_tuser_int = USER_W'(1);
             end
 
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
                 msg_rem_next = msg_rem_reg - 1;
 
                 if (s_axis_mac_rx.tlast) begin
-                    s_axis_mac_rx_tready_next = 1'b1;
-                    ptr_next = '0;
-                    state_next = STATE_ETH;
+                    if (msg_rem_reg == 9'd1 && in_whole && data_rem_reg != 0) begin
+                        // the message ended with the frame, before
+                        // ntscf_data_length did
+                        meta_req = 1'b1;
+                        meta_req_flags = FLAG_ERR_TRUNC;
+                    end else begin
+                        s_axis_mac_rx_tready_next = 1'b1;
+                        state_next = STATE_ETH;
+                    end
                 end else if (msg_rem_reg == 9'd1) begin
                     s_axis_mac_rx_tready_next = 1'b1;
                     state_next = data_rem_reg != 0 ? STATE_ACF : STATE_DROP;
@@ -448,9 +555,18 @@ always_comb begin
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready) begin
                 msg_rem_next = msg_rem_reg - 1;
 
+                if (msg_rem_reg == 9'd1 && in_whole) begin
+                    // the message is done
+                    acf_q0_next = '0;
+                end
+
                 if (s_axis_mac_rx.tlast) begin
-                    ptr_next = '0;
-                    state_next = STATE_ETH;
+                    if (msg_rem_reg != 9'd1 || !in_whole || data_rem_reg != 0) begin
+                        meta_req = 1'b1;
+                        meta_req_flags = FLAG_ERR_TRUNC;
+                    end else begin
+                        state_next = STATE_ETH;
+                    end
                 end else if (msg_rem_reg == 9'd1) begin
                     state_next = data_rem_reg != 0 ? STATE_ACF : STATE_DROP;
                 end
@@ -460,7 +576,6 @@ always_comb begin
             s_axis_mac_rx_tready_next = 1'b1;
 
             if (s_axis_mac_rx.tvalid && s_axis_mac_rx.tready && s_axis_mac_rx.tlast) begin
-                ptr_next = '0;
                 state_next = STATE_ETH;
             end
         end
@@ -468,6 +583,51 @@ always_comb begin
             state_next = STATE_ETH;
         end
     endcase
+
+    if (meta_req) begin
+        // hold the input while the block is loaded
+        meta_flags_next = meta_req_flags;
+        meta_len_next = meta_req_len;
+        meta_route_next = meta_req_route;
+        meta_ret_next = meta_req_ret;
+        meta_trunc_next = meta_req_trunc;
+        s_axis_mac_rx_tready_next = 1'b0;
+        state_next = STATE_META;
+    end
+end
+
+// read out metadata, a slot at a time
+logic [31:0]       m_axis_meta_tdata_reg = '0;
+logic              m_axis_meta_tvalid_reg = 1'b0, m_axis_meta_tvalid_next;
+logic              m_axis_meta_tlast_reg = 1'b0;
+logic [DEST_W-1:0] m_axis_meta_tdest_reg = '0;
+
+assign m_axis_meta.tdata  = m_axis_meta_tdata_reg;
+assign m_axis_meta.tkeep  = '1;
+assign m_axis_meta.tstrb  = m_axis_meta.tkeep;
+assign m_axis_meta.tvalid = m_axis_meta_tvalid_reg;
+assign m_axis_meta.tlast  = m_axis_meta_tlast_reg;
+assign m_axis_meta.tid    = '0;
+assign m_axis_meta.tdest  = m_axis_meta_tdest_reg;
+assign m_axis_meta.tuser  = '0;
+
+always_comb begin
+    meta_rd_slot_next = meta_rd_slot_reg;
+    meta_rd_ptr_next = meta_rd_ptr_reg;
+    meta_rd = 1'b0;
+
+    m_axis_meta_tvalid_next = m_axis_meta_tvalid_reg && !m_axis_meta.tready;
+
+    if (!meta_empty && (!m_axis_meta_tvalid_reg || m_axis_meta.tready)) begin
+        meta_rd = 1'b1;
+        m_axis_meta_tvalid_next = 1'b1;
+        meta_rd_ptr_next = meta_rd_ptr_reg + 1;
+
+        if (meta_rd_ptr_reg == 3'd5) begin
+            meta_rd_ptr_next = '0;
+            meta_rd_slot_next = meta_rd_slot_reg + 1;
+        end
+    end
 end
 
 always_ff @(posedge clk) begin
@@ -478,15 +638,24 @@ always_ff @(posedge clk) begin
     data_rem_reg <= data_rem_next;
     msg_rem_reg <= msg_rem_next;
     pad_reg <= pad_next;
-    frame_end_reg <= frame_end_next;
 
-    stream_id_reg <= stream_id_next;
-    seq_num_reg <= seq_num_next;
+    format_reg <= format_next;
     sv_reg <= sv_next;
-    mtv_reg <= mtv_next;
-    byte_bus_id_reg <= byte_bus_id_next;
-    payload_len_reg <= payload_len_next;
+    seq_num_reg <= seq_num_next;
+    stream_id_reg <= stream_id_next;
+    acf_q0_reg <= acf_q0_next;
     abb_1_reg <= abb_1_next;
+    payload_len_reg <= payload_len_next;
+
+    meta_flags_reg <= meta_flags_next;
+    meta_len_reg <= meta_len_next;
+    meta_route_reg <= meta_route_next;
+    meta_ret_reg <= meta_ret_next;
+    meta_trunc_reg <= meta_trunc_next;
+
+    meta_wr_slot_reg <= meta_wr_slot_next;
+    meta_rd_slot_reg <= meta_rd_slot_next;
+    meta_rd_ptr_reg <= meta_rd_ptr_next;
 
     s_axis_mac_rx_tready_reg <= s_axis_mac_rx_tready_next;
 
@@ -494,113 +663,130 @@ always_ff @(posedge clk) begin
         shift_reg <= s_axis_mac_rx.tdata[31:16];
     end
 
+    if (meta_wr) begin
+        meta_slot_reg[meta_wr_slot_reg[0]][0] <= {format_reg, meta_flags_reg, 5'd0, meta_len_reg};
+        meta_slot_reg[meta_wr_slot_reg[0]][1] <= stream_id_reg[63:32];
+        meta_slot_reg[meta_wr_slot_reg[0]][2] <= stream_id_reg[31:0];
+        meta_slot_reg[meta_wr_slot_reg[0]][3] <= {sv_reg, seq_num_reg, 23'd0};
+        meta_slot_reg[meta_wr_slot_reg[0]][4] <= acf_q0_reg;
+        meta_slot_reg[meta_wr_slot_reg[0]][5] <= abb_1_reg;
+        meta_slot_dest_reg[meta_wr_slot_reg[0]] <= meta_route_reg;
+    end
+
+    m_axis_meta_tvalid_reg <= m_axis_meta_tvalid_next;
+
+    if (meta_rd) begin
+        m_axis_meta_tdata_reg <= meta_slot_reg[meta_rd_slot_reg[0]][meta_rd_ptr_reg];
+        m_axis_meta_tlast_reg <= meta_rd_ptr_reg == 3'd5;
+        m_axis_meta_tdest_reg <= meta_slot_dest_reg[meta_rd_slot_reg[0]];
+    end
+
     if (rst) begin
         state_reg <= STATE_ETH;
         ptr_reg <= '0;
         route_reg <= '0;
-        frame_end_reg <= 1'b0;
+        meta_trunc_reg <= 1'b0;
+        meta_wr_slot_reg <= '0;
+        meta_rd_slot_reg <= '0;
+        meta_rd_ptr_reg <= '0;
         shift_reg <= '0;
         s_axis_mac_rx_tready_reg <= 1'b0;
+        m_axis_meta_tvalid_reg <= 1'b0;
     end
 end
 
 // output datapath logic
-logic [31:0]       m_axis_eth_rx_tdata_reg  = '0;
-logic [3:0]        m_axis_eth_rx_tkeep_reg  = '0;
-logic              m_axis_eth_rx_tvalid_reg = 1'b0, m_axis_eth_rx_tvalid_next;
-logic              m_axis_eth_rx_tlast_reg  = 1'b0;
-logic [ID_W-1:0]   m_axis_eth_rx_tid_reg    = '0;
-logic [DEST_W-1:0] m_axis_eth_rx_tdest_reg  = '0;
-logic [USER_W-1:0] m_axis_eth_rx_tuser_reg  = '0;
+logic [31:0]       m_axis_payload_tdata_reg  = '0;
+logic [3:0]        m_axis_payload_tkeep_reg  = '0;
+logic              m_axis_payload_tvalid_reg = 1'b0, m_axis_payload_tvalid_next;
+logic              m_axis_payload_tlast_reg  = 1'b0;
+logic [DEST_W-1:0] m_axis_payload_tdest_reg  = '0;
+logic [USER_W-1:0] m_axis_payload_tuser_reg  = '0;
 
-logic [31:0]       temp_m_axis_eth_rx_tdata_reg  = '0;
-logic [3:0]        temp_m_axis_eth_rx_tkeep_reg  = '0;
-logic              temp_m_axis_eth_rx_tvalid_reg = 1'b0, temp_m_axis_eth_rx_tvalid_next;
-logic              temp_m_axis_eth_rx_tlast_reg  = 1'b0;
-logic [ID_W-1:0]   temp_m_axis_eth_rx_tid_reg    = '0;
-logic [DEST_W-1:0] temp_m_axis_eth_rx_tdest_reg  = '0;
-logic [USER_W-1:0] temp_m_axis_eth_rx_tuser_reg  = '0;
+logic [31:0]       temp_m_axis_payload_tdata_reg  = '0;
+logic [3:0]        temp_m_axis_payload_tkeep_reg  = '0;
+logic              temp_m_axis_payload_tvalid_reg = 1'b0, temp_m_axis_payload_tvalid_next;
+logic              temp_m_axis_payload_tlast_reg  = 1'b0;
+logic [DEST_W-1:0] temp_m_axis_payload_tdest_reg  = '0;
+logic [USER_W-1:0] temp_m_axis_payload_tuser_reg  = '0;
 
 // datapath control
 logic store_axis_int_to_output;
 logic store_axis_int_to_temp;
 logic store_axis_temp_to_output;
 
-assign m_axis_eth_rx.tdata  = m_axis_eth_rx_tdata_reg;
-assign m_axis_eth_rx.tkeep  = m_axis_eth_rx_tkeep_reg;
-assign m_axis_eth_rx.tstrb  = m_axis_eth_rx.tkeep;
-assign m_axis_eth_rx.tvalid = m_axis_eth_rx_tvalid_reg;
-assign m_axis_eth_rx.tlast  = m_axis_eth_rx_tlast_reg;
-assign m_axis_eth_rx.tid    = m_axis_eth_rx_tid_reg;
-assign m_axis_eth_rx.tdest  = m_axis_eth_rx_tdest_reg;
-assign m_axis_eth_rx.tuser  = m_axis_eth_rx_tuser_reg;
+assign m_axis_payload.tdata  = m_axis_payload_tdata_reg;
+assign m_axis_payload.tkeep  = m_axis_payload_tkeep_reg;
+assign m_axis_payload.tstrb  = m_axis_payload.tkeep;
+assign m_axis_payload.tvalid = m_axis_payload_tvalid_reg;
+assign m_axis_payload.tlast  = m_axis_payload_tlast_reg;
+assign m_axis_payload.tid    = '0;
+assign m_axis_payload.tdest  = m_axis_payload_tdest_reg;
+assign m_axis_payload.tuser  = m_axis_payload_tuser_reg;
 
 // enable ready input next cycle if output is ready or the temp reg will not be filled on the next cycle (output reg empty or no input)
-assign m_axis_eth_rx_tready_int_early = m_axis_eth_rx.tready || (!temp_m_axis_eth_rx_tvalid_reg && (!m_axis_eth_rx_tvalid_reg || !m_axis_eth_rx_tvalid_int));
+assign m_axis_payload_tready_int_early = m_axis_payload.tready || (!temp_m_axis_payload_tvalid_reg && (!m_axis_payload_tvalid_reg || !m_axis_payload_tvalid_int));
 
 always_comb begin
     // transfer sink ready state to source
-    m_axis_eth_rx_tvalid_next = m_axis_eth_rx_tvalid_reg;
-    temp_m_axis_eth_rx_tvalid_next = temp_m_axis_eth_rx_tvalid_reg;
+    m_axis_payload_tvalid_next = m_axis_payload_tvalid_reg;
+    temp_m_axis_payload_tvalid_next = temp_m_axis_payload_tvalid_reg;
 
     store_axis_int_to_output = 1'b0;
     store_axis_int_to_temp = 1'b0;
     store_axis_temp_to_output = 1'b0;
 
-    if (m_axis_eth_rx_tready_int_reg) begin
+    if (m_axis_payload_tready_int_reg) begin
         // input is ready
-        if (m_axis_eth_rx.tready || !m_axis_eth_rx_tvalid_reg) begin
+        if (m_axis_payload.tready || !m_axis_payload_tvalid_reg) begin
             // output is ready or currently not valid, transfer data to output
-            m_axis_eth_rx_tvalid_next = m_axis_eth_rx_tvalid_int;
+            m_axis_payload_tvalid_next = m_axis_payload_tvalid_int;
             store_axis_int_to_output = 1'b1;
         end else begin
             // output is not ready, store input in temp
-            temp_m_axis_eth_rx_tvalid_next = m_axis_eth_rx_tvalid_int;
+            temp_m_axis_payload_tvalid_next = m_axis_payload_tvalid_int;
             store_axis_int_to_temp = 1'b1;
         end
-    end else if (m_axis_eth_rx.tready) begin
+    end else if (m_axis_payload.tready) begin
         // input is not ready, but output is ready
-        m_axis_eth_rx_tvalid_next = temp_m_axis_eth_rx_tvalid_reg;
-        temp_m_axis_eth_rx_tvalid_next = 1'b0;
+        m_axis_payload_tvalid_next = temp_m_axis_payload_tvalid_reg;
+        temp_m_axis_payload_tvalid_next = 1'b0;
         store_axis_temp_to_output = 1'b1;
     end
 end
 
 always_ff @(posedge clk) begin
-    m_axis_eth_rx_tvalid_reg <= m_axis_eth_rx_tvalid_next;
-    m_axis_eth_rx_tready_int_reg <= m_axis_eth_rx_tready_int_early;
-    temp_m_axis_eth_rx_tvalid_reg <= temp_m_axis_eth_rx_tvalid_next;
+    m_axis_payload_tvalid_reg <= m_axis_payload_tvalid_next;
+    m_axis_payload_tready_int_reg <= m_axis_payload_tready_int_early;
+    temp_m_axis_payload_tvalid_reg <= temp_m_axis_payload_tvalid_next;
 
     // datapath
     if (store_axis_int_to_output) begin
-        m_axis_eth_rx_tdata_reg <= m_axis_eth_rx_tdata_int;
-        m_axis_eth_rx_tkeep_reg <= m_axis_eth_rx_tkeep_int;
-        m_axis_eth_rx_tlast_reg <= m_axis_eth_rx_tlast_int;
-        m_axis_eth_rx_tid_reg   <= m_axis_eth_rx_tid_int;
-        m_axis_eth_rx_tdest_reg <= m_axis_eth_rx_tdest_int;
-        m_axis_eth_rx_tuser_reg <= m_axis_eth_rx_tuser_int;
+        m_axis_payload_tdata_reg <= m_axis_payload_tdata_int;
+        m_axis_payload_tkeep_reg <= m_axis_payload_tkeep_int;
+        m_axis_payload_tlast_reg <= m_axis_payload_tlast_int;
+        m_axis_payload_tdest_reg <= m_axis_payload_tdest_int;
+        m_axis_payload_tuser_reg <= m_axis_payload_tuser_int;
     end else if (store_axis_temp_to_output) begin
-        m_axis_eth_rx_tdata_reg <= temp_m_axis_eth_rx_tdata_reg;
-        m_axis_eth_rx_tkeep_reg <= temp_m_axis_eth_rx_tkeep_reg;
-        m_axis_eth_rx_tlast_reg <= temp_m_axis_eth_rx_tlast_reg;
-        m_axis_eth_rx_tid_reg   <= temp_m_axis_eth_rx_tid_reg;
-        m_axis_eth_rx_tdest_reg <= temp_m_axis_eth_rx_tdest_reg;
-        m_axis_eth_rx_tuser_reg <= temp_m_axis_eth_rx_tuser_reg;
+        m_axis_payload_tdata_reg <= temp_m_axis_payload_tdata_reg;
+        m_axis_payload_tkeep_reg <= temp_m_axis_payload_tkeep_reg;
+        m_axis_payload_tlast_reg <= temp_m_axis_payload_tlast_reg;
+        m_axis_payload_tdest_reg <= temp_m_axis_payload_tdest_reg;
+        m_axis_payload_tuser_reg <= temp_m_axis_payload_tuser_reg;
     end
 
     if (store_axis_int_to_temp) begin
-        temp_m_axis_eth_rx_tdata_reg <= m_axis_eth_rx_tdata_int;
-        temp_m_axis_eth_rx_tkeep_reg <= m_axis_eth_rx_tkeep_int;
-        temp_m_axis_eth_rx_tlast_reg <= m_axis_eth_rx_tlast_int;
-        temp_m_axis_eth_rx_tid_reg   <= m_axis_eth_rx_tid_int;
-        temp_m_axis_eth_rx_tdest_reg <= m_axis_eth_rx_tdest_int;
-        temp_m_axis_eth_rx_tuser_reg <= m_axis_eth_rx_tuser_int;
+        temp_m_axis_payload_tdata_reg <= m_axis_payload_tdata_int;
+        temp_m_axis_payload_tkeep_reg <= m_axis_payload_tkeep_int;
+        temp_m_axis_payload_tlast_reg <= m_axis_payload_tlast_int;
+        temp_m_axis_payload_tdest_reg <= m_axis_payload_tdest_int;
+        temp_m_axis_payload_tuser_reg <= m_axis_payload_tuser_int;
     end
 
     if (rst) begin
-        m_axis_eth_rx_tvalid_reg <= 1'b0;
-        m_axis_eth_rx_tready_int_reg <= 1'b0;
-        temp_m_axis_eth_rx_tvalid_reg <= 1'b0;
+        m_axis_payload_tvalid_reg <= 1'b0;
+        m_axis_payload_tready_int_reg <= 1'b0;
+        temp_m_axis_payload_tvalid_reg <= 1'b0;
     end
 end
 

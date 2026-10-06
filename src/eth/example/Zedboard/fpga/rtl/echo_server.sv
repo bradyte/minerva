@@ -16,7 +16,10 @@ Authors:
  * Echo server
  *
  * Test fixture standing in for minerva's consumer: consumes each message from
- * minerva_rx_parse, stores it, and produces the reply for minerva_tx_deparse.
+ * minerva_rx_parse, stores it, and produces the reply for minerva_tx.  The
+ * metadata and the payload are stored apart and never dropped one without the
+ * other; a truncated payload passes on marked by tuser, and minerva_tx marks
+ * its frame bad.
  */
 module echo_server
 (
@@ -24,14 +27,16 @@ module echo_server
     input  wire logic         rst,
 
     /*
-     * Record, then payload, from minerva_rx_parse
+     * Receive metadata and payload, from minerva_rx_parse
      */
-    taxi_axis_if.snk          s_axis_eth_rx,
+    taxi_axis_if.snk          s_axis_meta,
+    taxi_axis_if.snk          s_axis_payload,
 
     /*
-     * Reply record, then payload, to minerva_tx_deparse
+     * Transmit metadata and payload, to minerva_tx
      */
-    taxi_axis_if.src          m_axis_eth_tx,
+    taxi_axis_if.src          m_axis_meta,
+    taxi_axis_if.src          m_axis_payload,
 
     /*
      * Configuration
@@ -40,39 +45,36 @@ module echo_server
 );
 
 taxi_axis_if #(
-    .DATA_W(s_axis_eth_rx.DATA_W),
-    .KEEP_EN(s_axis_eth_rx.KEEP_EN),
-    .KEEP_W(s_axis_eth_rx.KEEP_W),
-    .LAST_EN(s_axis_eth_rx.LAST_EN),
-    .ID_EN(s_axis_eth_rx.ID_EN),
-    .ID_W(s_axis_eth_rx.ID_W),
-    .DEST_EN(s_axis_eth_rx.DEST_EN),
-    .DEST_W(s_axis_eth_rx.DEST_W),
-    .USER_EN(s_axis_eth_rx.USER_EN),
-    .USER_W(s_axis_eth_rx.USER_W)
-) axis_eth_rx_fifo();
+    .DATA_W(s_axis_meta.DATA_W),
+    .KEEP_EN(s_axis_meta.KEEP_EN),
+    .KEEP_W(s_axis_meta.KEEP_W),
+    .LAST_EN(s_axis_meta.LAST_EN),
+    .ID_EN(s_axis_meta.ID_EN),
+    .ID_W(s_axis_meta.ID_W),
+    .DEST_EN(s_axis_meta.DEST_EN),
+    .DEST_W(s_axis_meta.DEST_W),
+    .USER_EN(s_axis_meta.USER_EN),
+    .USER_W(s_axis_meta.USER_W)
+) axis_meta_stored();
 
-// each message is held until it is complete, and a truncated one, marked by
-// tuser, is dropped
+// each metadata block, held until the producer takes it
 taxi_axis_fifo #(
-    .DEPTH(2048),
-    .FRAME_FIFO(1),
-    .DROP_BAD_FRAME(1),
-    .DROP_WHEN_FULL(0)
+    .DEPTH(256),
+    .FRAME_FIFO(0)
 )
-storage_inst (
+meta_storage_inst (
     .clk(clk),
     .rst(rst),
 
     /*
      * AXI4-Stream input (sink)
      */
-    .s_axis(s_axis_eth_rx),
+    .s_axis(s_axis_meta),
 
     /*
      * AXI4-Stream output (source)
      */
-    .m_axis(axis_eth_rx_fifo),
+    .m_axis(axis_meta_stored),
 
     /*
      * Pause
@@ -90,13 +92,51 @@ storage_inst (
     .status_good_frame()
 );
 
-record_echo
+// each payload, held until it is complete; one marked by tuser is kept, so it
+// stays paired with its metadata
+taxi_axis_fifo #(
+    .DEPTH(2048),
+    .FRAME_FIFO(1),
+    .DROP_BAD_FRAME(0),
+    .DROP_WHEN_FULL(0)
+)
+payload_storage_inst (
+    .clk(clk),
+    .rst(rst),
+
+    /*
+     * AXI4-Stream input (sink)
+     */
+    .s_axis(s_axis_payload),
+
+    /*
+     * AXI4-Stream output (source)
+     */
+    .m_axis(m_axis_payload),
+
+    /*
+     * Pause
+     */
+    .pause_req(1'b0),
+    .pause_ack(),
+
+    /*
+     * Status
+     */
+    .status_depth(),
+    .status_depth_commit(),
+    .status_overflow(),
+    .status_bad_frame(),
+    .status_good_frame()
+);
+
+meta_echo
 producer_inst (
     .clk(clk),
     .rst(rst),
 
-    .s_axis_eth_rx(axis_eth_rx_fifo),
-    .m_axis_eth_tx(m_axis_eth_tx),
+    .s_axis_meta(axis_meta_stored),
+    .m_axis_meta(m_axis_meta),
 
     .cfg_local_mac(cfg_local_mac)
 );

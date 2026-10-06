@@ -41,9 +41,6 @@ except ImportError:
 
 ETHERTYPE_AVTP = 0x22F0
 
-# demux port for AVTP, as in the RTL route table
-ROUTE_AVTP = 0
-
 # every byte differs so a misplaced lane shows
 LOCAL_MAC = 0x5A5152535455
 HOST_MAC = 0xDAD1D2D3D4D5
@@ -64,7 +61,8 @@ class TB(object):
 
         cocotb.start_soon(Clock(dut.clk, 8, units="ns").start())
 
-        self.source = AxiStreamSource(AxiStreamBus.from_entity(dut.s_axis_eth_tx), dut.clk, dut.rst)
+        self.meta_source = AxiStreamSource(AxiStreamBus.from_entity(dut.s_axis_meta), dut.clk, dut.rst)
+        self.payload_source = AxiStreamSource(AxiStreamBus.from_entity(dut.s_axis_payload), dut.clk, dut.rst)
         self.sink = AxiStreamSink(AxiStreamBus.from_entity(dut.m_axis_mac_tx), dut.clk, dut.rst)
 
         cocotb.start_soon(check_axis_stable(self.sink.bus, dut.clk, dut.rst))
@@ -73,7 +71,8 @@ class TB(object):
 
     def set_idle_generator(self, generator=None):
         if generator:
-            self.source.set_pause_generator(generator())
+            self.meta_source.set_pause_generator(generator())
+            self.payload_source.set_pause_generator(generator())
 
     def set_backpressure_generator(self, generator=None):
         if generator:
@@ -104,8 +103,9 @@ def last_tuser(frame):
 
 
 def message(k, payload, dst=HOST_MAC, src=LOCAL_MAC, sv=1):
-    """A producer packet for an ABB message with fields varied by k, and the
-    frame minerva_tx_deparse builds from it, before the MAC pads it."""
+    """The metadata a producer sends for an ABB message with fields varied by
+    k, and the frame minerva_tx builds from it and the payload, before the MAC
+    pads it."""
     sequence_num = (0xfd + k) & 0xff
     byte_bus_id = (0x5ff + 0x123 * k) & 0x7ff
     mtv = k & 1
@@ -113,29 +113,33 @@ def message(k, payload, dst=HOST_MAC, src=LOCAL_MAC, sv=1):
                            transaction_num=(0x40 + k) & 0xff, op=(k >> 2) & 1,
                            rsp=(k >> 3) & 1, err=(k >> 1) & 1, ms=k & 1,
                            read_size=(0xbff - k) & 0xfff)
-    pkt = avtp.abb_tx_packet(STREAM_ID, sequence_num, byte_bus_id, word1, payload, dst, sv=sv, mtv=mtv)
+    meta = avtp.abb_tx_meta(STREAM_ID, sequence_num, byte_bus_id, word1, len(payload), dst, sv=sv, mtv=mtv)
     pdu = avtp.ntscf_pdu(STREAM_ID, sequence_num, [avtp.abb_message(byte_bus_id, mtv, word1, payload)], sv=sv)
     frame = bytes(Ether(dst=mac_str(dst), src=mac_str(src), type=ETHERTYPE_AVTP) / Raw(pdu))
-    return pkt, frame
+    return meta, frame
 
 
-def send_frame(pkt, tid=avtp.FORMAT_ABB, tdest=ROUTE_AVTP, abort=False):
-    """The input frame for a packet; abort sets tuser on its last beat only."""
-    tuser = [0] * (len(pkt) - 1) + [1] if abort else 0
-    return AxiStreamFrame(pkt, tid=tid, tdest=tdest, tuser=tuser)
+def tx_meta(payload_len, format=avtp.SUBTYPE_NTSCF, flags=0):
+    """Transmit metadata with plain fields, to be made malformed."""
+    return avtp.meta(format, flags, payload_len, STREAM_ID, 1, 1,
+                     [avtp.abb_word0(0x123), 0, HOST_MAC >> 16, (HOST_MAC & 0xffff) << 16])
 
 
 async def run_frames(tb, test_frames):
-    """Send each input and check what comes out, in order.
+    """Send each message and check what comes out, in order.
 
-    test_frames holds (input frame, expected), where expected is the frame
-    bytes, BAD for a frame that must end with tuser set, or None for an input
-    that must give nothing.
+    test_frames holds (meta, payload, abort, expected): the metadata block,
+    then the payload sent after it, if any, with tuser on its last beat if
+    abort.  expected is the frame, BAD for a frame that must end with tuser
+    set, or None for a message that must give nothing.
     """
-    for frame, _ in test_frames:
-        await tb.source.send(frame)
+    for meta, payload, abort, _ in test_frames:
+        await tb.meta_source.send(AxiStreamFrame(meta))
+        if payload:
+            tuser = [0] * (len(payload) - 1) + [1] if abort else 0
+            await tb.payload_source.send(AxiStreamFrame(payload, tuser=tuser))
 
-    for _, expected in test_frames:
+    for _, _, _, expected in test_frames:
         if expected is None:
             continue
 
@@ -148,17 +152,18 @@ async def run_frames(tb, test_frames):
             assert bytes(rx_frame.tdata) == expected
 
     # let any wrongly built frame surface
-    await tb.source.wait()
+    await tb.meta_source.wait()
+    await tb.payload_source.wait()
     for k in range(20):
         await RisingEdge(tb.dut.clk)
 
     assert tb.sink.empty()
 
 
-
 async def run_test_frame(dut, idle_inserter=None, backpressure_inserter=None):
-    """Each record and payload gives the frame for it, byte for byte, at every
-    pad, with every record field placed where it belongs."""
+    """Each message gives the frame for it, byte for byte, at every pad, with
+    every metadata field placed where it belongs; a message without a payload
+    gives the header alone."""
 
     tb = TB(dut)
 
@@ -169,17 +174,25 @@ async def run_test_frame(dut, idle_inserter=None, backpressure_inserter=None):
 
     test_frames = []
 
+    def add(n, sv=1):
+        k = len(test_frames)
+        payload = payload_data(n, k)
+        meta, frame = message(k, payload, sv=sv)
+        test_frames.append((meta, payload, False, frame))
+
     # every pad twice over, sv both ways, and the largest payload a frame holds
     for n in list(range(9)) + [1480]:
-        k = len(test_frames)
-        pkt, frame = message(k, payload_data(n, k), sv=(k >> 1) & 1)
-        test_frames.append((send_frame(pkt), frame))
+        add(n, sv=(len(test_frames) >> 1) & 1)
+
+    # a run without payloads, then mixed, so both slots fill
+    for n in [0] * 8 + [1, 0, 2, 0, 3, 0]:
+        add(n)
 
     await run_frames(tb, test_frames)
 
 
 async def run_test_local_mac(dut, idle_inserter=None, backpressure_inserter=None):
-    """The source address is cfg_local_mac as each record began."""
+    """The source address is cfg_local_mac as each header began."""
 
     tb = TB(dut)
 
@@ -191,8 +204,10 @@ async def run_test_local_mac(dut, idle_inserter=None, backpressure_inserter=None
     for k, mac in enumerate([LOCAL_MAC, 0x021122334455, 0x02AABBCCDDEE]):
         dut.cfg_local_mac.value = mac
 
-        pkt, frame = message(k, payload_data(k + 5, k), src=mac)
-        await tb.source.send(send_frame(pkt))
+        payload = payload_data(k + 5, k)
+        meta, frame = message(k, payload, src=mac)
+        await tb.meta_source.send(AxiStreamFrame(meta))
+        await tb.payload_source.send(AxiStreamFrame(payload))
 
         rx_frame = await tb.sink.recv()
         assert not last_tuser(rx_frame)
@@ -200,8 +215,8 @@ async def run_test_local_mac(dut, idle_inserter=None, backpressure_inserter=None
 
 
 async def run_test_drop(dut, idle_inserter=None, backpressure_inserter=None):
-    """A record that cannot become a frame gives nothing, and leaves its
-    neighbours intact."""
+    """Metadata that cannot become a frame gives nothing; its payload, if it
+    announces one, is drained, so the messages after it stay paired."""
 
     tb = TB(dut)
 
@@ -214,37 +229,36 @@ async def run_test_drop(dut, idle_inserter=None, backpressure_inserter=None):
 
     def good():
         k = len(test_frames)
-        pkt, frame = message(k, payload_data(k % 7, k))
-        test_frames.append((send_frame(pkt), frame))
+        payload = payload_data(k % 7, k)
+        meta, frame = message(k, payload)
+        test_frames.append((meta, payload, False, frame))
 
-    def drop(frame):
-        test_frames.append((frame, None))
-
-    def record(payload_len):
-        return avtp.abb_tx_record(STREAM_ID, 1, 0x123, 0, payload_len, HOST_MAC)
+    def drop(meta, payload=b''):
+        test_frames.append((meta, payload, False, None))
 
     good()
 
-    # an unknown format or route
-    drop(send_frame(message(1, payload_data(4, 0))[0], tid=1))
-    drop(send_frame(message(2, payload_data(4, 0))[0], tdest=1))
+    # another format, and flags set
+    drop(tx_meta(4, format=avtp.SUBTYPE_TSCF), payload_data(4, 0))
+    drop(tx_meta(4, flags=avtp.FLAG_ERR_LEN), payload_data(4, 0))
 
     good()
 
-    # shorter than a record
-    for n in (4, 12, 20):
-        drop(send_frame(record(0)[:n]))
+    # shorter than eight words, with and without a payload announced
+    for n in (4, 12, 20, 28):
+        drop(tx_meta(0)[:n])
+    drop(tx_meta(6)[:12], payload_data(6, 0))
 
     good()
 
-    # a payload the record does not announce, one it announces that is
-    # missing, and one too long for a frame
-    drop(send_frame(record(0) + payload_data(8, 0)))
-    drop(send_frame(record(4)))
-    drop(send_frame(record(1481) + payload_data(1481, 0)))
+    # longer than eight words, with and without a payload announced
+    drop(tx_meta(0) + bytes(4))
+    drop(tx_meta(5) + bytes(8), payload_data(5, 0))
 
-    # a record alone, aborted
-    drop(send_frame(record(0), abort=True))
+    good()
+
+    # a payload too long for a frame
+    drop(tx_meta(1481), payload_data(1481, 0))
 
     good()
 
@@ -266,21 +280,20 @@ async def run_test_bad(dut, idle_inserter=None, backpressure_inserter=None):
 
     def good():
         k = len(test_frames)
-        pkt, frame = message(k, payload_data(k % 7 + 1, k))
-        test_frames.append((send_frame(pkt), frame))
-
-    def record(payload_len):
-        return avtp.abb_tx_record(STREAM_ID, 1, 0x123, 0, payload_len, HOST_MAC)
+        payload = payload_data(k % 7 + 1, k)
+        meta, frame = message(k, payload)
+        test_frames.append((meta, payload, False, frame))
 
     good()
 
     # short and long, within the last word and by whole words
     for payload_len, n in [(10, 9), (10, 6), (10, 11), (10, 15), (4, 3), (4, 5)]:
-        test_frames.append((send_frame(record(payload_len) + payload_data(n, 0)), BAD))
+        test_frames.append((tx_meta(payload_len), payload_data(n, 0), False, BAD))
         good()
 
-    # aborted at the end of a payload that matches its record
-    test_frames.append((send_frame(message(9, payload_data(13, 0))[0], abort=True), BAD))
+    # aborted at the end of a payload that matches its metadata
+    payload = payload_data(13, 0)
+    test_frames.append((message(9, payload)[0], payload, True, BAD))
 
     good()
 
@@ -322,14 +335,14 @@ def process_f_files(files):
     return list(lst.values())
 
 
-def test_minerva_tx_deparse(request):
-    dut = "minerva_tx_deparse"
+def test_minerva_tx(request):
+    dut = "minerva_tx"
     module = os.path.splitext(os.path.basename(__file__))[0]
     toplevel = module
 
     verilog_sources = [
         os.path.join(tests_dir, f"{toplevel}.sv"),
-        os.path.join(rtl_dir, f"{dut}.sv"),
+        os.path.join(rtl_dir, f"{dut}.f"),
         os.path.join(taxi_src_dir, "axis", "rtl", "taxi_axis_if.sv"),
     ]
 
@@ -337,8 +350,6 @@ def test_minerva_tx_deparse(request):
 
     parameters = {}
 
-    parameters['ID_W'] = 4
-    parameters['DEST_W'] = 1
 
     extra_env = {f'PARAM_{k}': str(v) for k, v in parameters.items()}
 

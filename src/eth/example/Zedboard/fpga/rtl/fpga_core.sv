@@ -15,10 +15,10 @@ Authors:
 /*
  * FPGA core logic
  *
- * Minerva on the ADIN1300 MAC.  Each ABB message received comes back from
- * minerva's record, in the board's own stream and from the LOCAL_MAC
- * register, to the talker of the request's stream; every other frame is
- * dropped in the parser.
+ * Minerva on the ADIN1300 MAC.  Each ABB message received comes back from its
+ * metadata and payload, in the board's own stream and from the LOCAL_MAC
+ * register, to the talker of the request's stream; frames on the discard
+ * route are dropped.
  */
 module fpga_core #
 (
@@ -382,7 +382,9 @@ wire [47:0] local_mac = {
     regs_hwif_out.net.LOCAL_MAC_0.data.value
 };
 
-taxi_axis_if #(.DATA_W(32), .ID_EN(1), .ID_W(4), .DEST_EN(1), .DEST_W(1), .USER_EN(1), .USER_W(1)) axis_eth_rx(), axis_eth_tx();
+taxi_axis_if #(.DATA_W(32), .DEST_EN(1), .DEST_W(1)) axis_rx_meta(), axis_rx_meta_route[2]();
+taxi_axis_if #(.DATA_W(32), .DEST_EN(1), .DEST_W(1), .USER_EN(1), .USER_W(1)) axis_rx_payload(), axis_tx_payload();
+taxi_axis_if #(.DATA_W(32)) axis_tx_meta();
 
 minerva_rx_parse
 minerva_rx_parse_inst (
@@ -390,7 +392,41 @@ minerva_rx_parse_inst (
     .rst(rst),
 
     .s_axis_mac_rx(axis_mac_rx),
-    .m_axis_eth_rx(axis_eth_rx)
+    .m_axis_meta(axis_rx_meta),
+    .m_axis_payload(axis_rx_payload)
+);
+
+// each metadata route to its handler: 0 the consumer, 1 discard; only route 0
+// has payloads
+taxi_axis_demux #(
+    .M_COUNT(2),
+    .TDEST_ROUTE(1'b1)
+)
+rx_route_inst (
+    .clk(clk),
+    .rst(rst),
+
+    /*
+     * AXI4-Stream input (sink)
+     */
+    .s_axis(axis_rx_meta),
+
+    /*
+     * AXI4-Stream outputs (sources)
+     */
+    .m_axis(axis_rx_meta_route),
+
+    /*
+     * Control
+     */
+    .enable(1'b1),
+    .drop(1'b0),
+    .select('0)
+);
+
+taxi_axis_null_snk
+rx_discard_inst (
+    .s_axis(axis_rx_meta_route[1])
 );
 
 echo_server
@@ -398,18 +434,21 @@ echo_server_inst (
     .clk(clk),
     .rst(rst),
 
-    .s_axis_eth_rx(axis_eth_rx),
-    .m_axis_eth_tx(axis_eth_tx),
+    .s_axis_meta(axis_rx_meta_route[0]),
+    .s_axis_payload(axis_rx_payload),
+    .m_axis_meta(axis_tx_meta),
+    .m_axis_payload(axis_tx_payload),
 
     .cfg_local_mac(local_mac)
 );
 
-minerva_tx_deparse
-minerva_tx_deparse_inst (
+minerva_tx
+minerva_tx_inst (
     .clk(clk),
     .rst(rst),
 
-    .s_axis_eth_tx(axis_eth_tx),
+    .s_axis_meta(axis_tx_meta),
+    .s_axis_payload(axis_tx_payload),
     .m_axis_mac_tx(axis_mac_tx),
 
     .cfg_local_mac(local_mac)

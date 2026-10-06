@@ -23,7 +23,7 @@ COCOTB_TOPLEVEL     = test_$(DUT)
 MODULE   = $(COCOTB_TEST_MODULES)
 TOPLEVEL = $(COCOTB_TOPLEVEL)
 VERILOG_SOURCES += $(COCOTB_TOPLEVEL).sv
-VERILOG_SOURCES += $(RTL_DIR)/minerva_tx_deparse.sv
+VERILOG_SOURCES += $(RTL_DIR)/minerva_tx.f
 VERILOG_SOURCES += $(RTL_DIR)/minerva_rx_parse.sv
 VERILOG_SOURCES += $(TAXI_SRC_DIR)/axis/rtl/taxi_axis_if.sv
 
@@ -34,7 +34,6 @@ uniq_base = $(if $1,$(call uniq_base,$(foreach f,$1,$(if $(filter-out $(notdir $
 VERILOG_SOURCES := $(call uniq_base,$(call process_f_files,$(VERILOG_SOURCES)))
 
 # module parameters
-export PARAM_ID_W := 4
 export PARAM_DEST_W := 1
 
 ifeq ($(SIM), icarus)

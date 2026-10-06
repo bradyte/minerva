@@ -17,13 +17,13 @@ RTL_DIR = ../../rtl
 LIB_DIR = ../../lib
 TAXI_SRC_DIR = $(LIB_DIR)/taxi/src
 
-DUT      = minerva_tx_deparse
+DUT      = minerva_tx
 COCOTB_TEST_MODULES = test_$(DUT)
 COCOTB_TOPLEVEL     = test_$(DUT)
 MODULE   = $(COCOTB_TEST_MODULES)
 TOPLEVEL = $(COCOTB_TOPLEVEL)
 VERILOG_SOURCES += $(COCOTB_TOPLEVEL).sv
-VERILOG_SOURCES += $(RTL_DIR)/$(DUT).sv
+VERILOG_SOURCES += $(RTL_DIR)/$(DUT).f
 VERILOG_SOURCES += $(TAXI_SRC_DIR)/axis/rtl/taxi_axis_if.sv
 
 # handle file list files
@@ -33,8 +33,6 @@ uniq_base = $(if $1,$(call uniq_base,$(foreach f,$1,$(if $(filter-out $(notdir $
 VERILOG_SOURCES := $(call uniq_base,$(call process_f_files,$(VERILOG_SOURCES)))
 
 # module parameters
-export PARAM_ID_W := 4
-export PARAM_DEST_W := 1
 
 ifeq ($(SIM), icarus)
 	PLUSARGS += -fst
